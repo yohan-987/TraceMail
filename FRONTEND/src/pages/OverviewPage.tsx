@@ -46,30 +46,33 @@ export function OverviewPage() {
   const [sortKey, setSortKey] = useState<SortKey>('score-desc');
   const [selectedEmailId, setSelectedEmailId] = useState<string | null>(null);
 
-  // --- LIVE API STATE ---
-  const [apiEmails, setApiEmails] = useState<ScannedEmail[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+// --- LIVE API STATE ---
+const [apiEmails, setApiEmails] = useState<ScannedEmail[]>([]);
+const [totalEmails, setTotalEmails] = useState(0);
+const [isLoading, setIsLoading] = useState(true);
+const [error, setError] = useState<string | null>(null);
 
-  // --- FETCH DATA ON LOAD ---
-  useEffect(() => {
-    getEmails()
-      .then((response) => {
-        const mappedData = response.items.map(mapApiEmailToUiEmail);
-        setApiEmails(mappedData); 
-      })
-      .catch((err) => setError(err.message))
-      .finally(() => setIsLoading(false));
-  }, []);
-
-  // --- CALCULATE STATS FROM REAL DATA ---
-  const stats = useMemo(() => ({
-    total: apiEmails.length,
-    safe: apiEmails.filter((e) => e.status === 'safe').length,
-    suspicious: apiEmails.filter((e) => e.status === 'suspicious').length,
-    malicious: apiEmails.filter((e) => e.status === 'malicious').length,
-    inconclusive: apiEmails.filter((e) => e.status === 'inconclusive').length,
-  }), [apiEmails]);
+// --- FETCH DATA ON LOAD ---
+useEffect(() => {
+  getEmails({ limit: 200, sort: 'date' })
+    .then((response) => {
+      const mappedData = response.items.map(mapApiEmailToUiEmail);
+      setApiEmails(mappedData);
+      setTotalEmails(response.pagination.total);
+    })
+    .catch((err) =>
+      setError(err instanceof Error ? err.message : 'Failed to load emails')
+    )
+    .finally(() => setIsLoading(false));
+}, []);
+// --- CALCULATE STATS FROM REAL DATA ---
+const stats = useMemo(() => ({
+  total: totalEmails,
+  safe: apiEmails.filter((e) => e.status === 'safe').length,
+  suspicious: apiEmails.filter((e) => e.status === 'suspicious').length,
+  malicious: apiEmails.filter((e) => e.status === 'malicious').length,
+  inconclusive: apiEmails.filter((e) => e.status === 'inconclusive').length,
+}), [apiEmails, totalEmails]);
 
   // --- SELECT FROM REAL DATA ---
   const selectedEmail = useMemo(

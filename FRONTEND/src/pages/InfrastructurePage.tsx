@@ -1,12 +1,42 @@
-import { useState, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Network, MapPin, Server, Globe, Link2, Zap, Eye, Sparkles, Radar, AlertTriangle, ShieldQuestion } from 'lucide-react';
 import { Card, SectionLabel, Badge, Divider } from '@/components/ui/Primitives';
 import { useActiveCase } from '@/context/ActiveCaseContext';
 import { InvestigationShell } from '@/components/InvestigationShell';
 import { InvestigationWorkspace, PreviewField, PreviewInvestigateButton } from '@/components/InvestigationWorkspace';
-import type { InfraNode, InfraEdge, GeoEntry, ScannedEmail } from '@/data/mockData';
 import { cn } from '@/lib/utils';
+import { getEmail as fetchEmailDetails } from '@/api/api';
+
+// --- TYPES ---
+export interface InfraNode {
+  id: string;
+  type: 'ip' | 'domain' | 'server' | 'sender';
+  label: string;
+  status: 'malicious' | 'suspicious' | 'clean' | 'unknown';
+  x: number;
+  y: number;
+}
+
+export interface InfraEdge {
+  from: string;
+  to: string;
+  label: string;
+}
+
+export interface MappedGeoEntry {
+  ip: string;
+  country: string;
+  region?: string;
+  city: string;
+  lat: number;
+  lon: number;
+  flag: string;
+  isp: string;
+  asn: string;
+  organization?: string;
+  hosting?: string;
+}
 
 const nodeIcons: Record<string, typeof Server> = {
   ip: Server,
@@ -19,29 +49,22 @@ const statusColors: Record<string, string> = {
   malicious: 'text-accent-500 border-accent-700/30 bg-accent-700/10',
   suspicious: 'text-amber-500 border-amber-700/20 bg-amber-700/10',
   clean: 'text-emerald-500 border-emerald-700/20 bg-emerald-700/10',
+  unknown: 'text-ink-400 border-base-500/30 bg-base-800/50',
 };
 
-/** Renders the doc's literal "unknown" placeholder as INCONCLUSIVE — the data
- *  exists but the upstream lookup couldn't resolve it, which is exactly what
- *  that label means, rather than showing a vague raw string. */
-function geoValue(raw: string): string {
+function geoValue(raw: string | undefined | null): string {
   if (!raw || raw.toLowerCase() === 'unknown') return 'INCONCLUSIVE';
   return raw;
 }
 
-/**
- * "Intelligence status" for a candidate IP is derived from the existing
- * infraNode record for that same IP (already a real classification in the
- * shared dataset) — not invented. If no matching node exists, it's
- * genuinely UNAVAILABLE rather than guessed at.
- */
-function intelStatus(geo: GeoEntry, nodes: InfraNode[]): string | null {
+function intelStatus(geo: MappedGeoEntry, nodes: InfraNode[]): string | null {
   const match = nodes.find((n) => n.type === 'ip' && n.label === geo.ip);
   if (!match) return null;
   switch (match.status) {
     case 'malicious': return 'Malicious';
     case 'suspicious': return 'Suspicious';
     case 'clean': return 'Verified';
+    default: return 'Unknown';
   }
 }
 
@@ -52,47 +75,143 @@ function intelColor(label: string | null): string {
   return 'text-ink-500';
 }
 
+function mapDetailedApiToInfrastructure(apiData: any) {
+  const geoData: MappedGeoEntry[] = [];
+  const infraNodes: InfraNode[] = [];
+  const infraEdges: InfraEdge[] = []; // Kept empty until Batch 5A provides real relationships
+
+  const ipIntel = apiData?.infrastructure?.ipIntelligence || [];
+  const senderDomain = apiData?.parsedEmail?.from?.[0]?.domain || 'Unknown Domain';
+
+  // Plot the core Sender Domain node with an honest 'unknown' status (no fake score inheritance)
+  infraNodes.push({
+    id: 'domain-node',
+    type: 'domain',
+    label: senderDomain,
+    status: 'unknown',
+    x: 50,
+    y: 20
+  });
+
+  // Map IP Intelligence into GeoData and Graph Nodes without fabricating speculative edges
+  ipIntel.forEach((ipObj: any, index: number) => {
+    geoData.push({
+      ip: ipObj.ip,
+      country: ipObj.country || 'Unknown',
+      region: ipObj.region || 'Unknown',
+      city: ipObj.city || 'Unknown',
+      lat: ipObj.lat || 0,
+      lon: ipObj.lon || 0,
+      flag: ipObj.country?.substring(0, 2)?.toUpperCase() || '??',
+      isp: ipObj.isp || 'Unknown',
+      asn: ipObj.asn || 'Unknown',
+      organization: ipObj.organization,
+      hosting: ipObj.hosting
+    });
+
+    const ipNodeId = `ip-node-${index}`;
+    infraNodes.push({
+      id: ipNodeId,
+      type: 'ip',
+      label: ipObj.ip,
+      status: 'unknown',
+      x: 20 + ((index % 3) * 30),
+      y: 70 + (Math.floor(index / 3) * 15)
+    });
+  });
+
+  return { geoData, infraNodes, infraEdges };
+}
+
 export function InfrastructurePage() {
-  // Locally-owned selection — this page's own `infrastructureSelectedEmailId`.
   const location = useLocation();
-  const { getEmail, setLastViewed, availableEmails } = useActiveCase();
+  const { setLastViewed, availableEmails } = useActiveCase();
+  
   const [infrastructureSelectedEmailId, setInfrastructureSelectedEmailId] = useState<string | null>(
     (location.state as { emailId?: string } | null)?.emailId ?? null
   );
 
-  const activeEmail = useMemo(() => getEmail(infrastructureSelectedEmailId), [getEmail, infrastructureSelectedEmailId]);
+  const [activeEmailData, setActiveEmailData] = useState<any | null>(null);
+  const [mappedInfra, setMappedInfra] = useState<{ geoData: MappedGeoEntry[], infraNodes: InfraNode[], infraEdges: InfraEdge[] }>({
+    geoData: [], infraNodes: [], infraEdges: []
+  });
+  const [isLoadingDetails, setIsLoadingDetails] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
 
-  const handleInvestigate = (email: ScannedEmail) => {
-    setInfrastructureSelectedEmailId(email.id);
-    setLastViewed(email.id);
+  useEffect(() => {
+    if (!infrastructureSelectedEmailId) {
+      setActiveEmailData(null);
+      setMappedInfra({ geoData: [], infraNodes: [], infraEdges: [] });
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingDetails(true);
+    setDetailsError(null);
+
+    fetchEmailDetails(infrastructureSelectedEmailId)
+      .then((data) => {
+        if (!cancelled) {
+          setActiveEmailData(data);
+          setMappedInfra(mapDetailedApiToInfrastructure(data));
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setDetailsError(err instanceof Error ? err.message : 'Failed to load infrastructure');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoadingDetails(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [infrastructureSelectedEmailId]);
+
+  const handleInvestigate = (emailId: string) => {
+    setInfrastructureSelectedEmailId(emailId);
+    setLastViewed(emailId);
   };
 
-  const nodes = activeEmail?.infraNodes ?? [];
-  const edges = activeEmail?.infraEdges ?? [];
-  // Only IPs with an actual coordinate are "candidates" for the map/geo view —
-  // a 0,0 lat/lon in this dataset means "no location resolved," not the coast
-  // of Africa, so it's excluded rather than plotted as if it were real.
-  const geoData = activeEmail?.geoData ?? [];
+  const { geoData, infraNodes, infraEdges } = mappedInfra;
+  
   const candidateGeo = geoData.filter((g) => !(g.lat === 0 && g.lon === 0));
   const unresolvedGeo = geoData.filter((g) => g.lat === 0 && g.lon === 0);
+
+  const headerEmailContext = activeEmailData ? {
+    id: activeEmailData.emailId,
+    subject: activeEmailData.parsedEmail?.subject || 'No Subject',
+    caseId: activeEmailData.caseId
+  } : null;
 
   return (
     <InvestigationShell
       breadcrumb="Infrastructure"
       title="Infrastructure Analysis"
-      subtitle={activeEmail ? `Relationships, geolocation, and probable infrastructure · ${activeEmail.id}` : undefined}
-      hideCaseSelector={!activeEmail}
-      selectedEmail={activeEmail}
+      subtitle={activeEmailData ? `Relationships, geolocation, and probable infrastructure · ${activeEmailData.emailId}` : undefined}
+      hideCaseSelector={!activeEmailData}
+      selectedEmail={headerEmailContext as any}
       availableEmails={availableEmails}
       onSelectEmail={(id) => { setInfrastructureSelectedEmailId(id); setLastViewed(id); }}
       onClearEmail={() => setInfrastructureSelectedEmailId(null)}
-      investigationNav={activeEmail ? { emailId: activeEmail.id, activeSection: 'infrastructure' } : undefined}
+      investigationNav={activeEmailData ? { emailId: activeEmailData.emailId, activeSection: 'infrastructure' } : undefined}
     >
-      {!activeEmail ? (
-        <InvestigationWorkspace onInvestigate={handleInvestigate} renderPreview={renderInfrastructurePreview} />
+      {isLoadingDetails ? (
+        <div className="flex items-center justify-center h-[500px] w-full text-ink-400 font-mono text-sm animate-pulse">
+          Mapping infrastructure...
+        </div>
+      ) : detailsError ? (
+        <div className="flex items-center justify-center h-[500px] w-full text-accent-500 font-mono text-sm">
+          Error: {detailsError}
+        </div>
+      ) : !activeEmailData ? (
+        <InvestigationWorkspace onInvestigate={(e: any) => handleInvestigate(e.id)} renderPreview={renderInfrastructurePreview} />
       ) : (
-        <div key={activeEmail.id} className="animate-fade-in">
-          {/* Doc-required disclaimer — infrastructure location is not attacker identity */}
+        <div key={activeEmailData.emailId} className="animate-fade-in">
           <div className="flex items-center gap-2.5 px-4 py-2.5 rounded-lg bg-amber-900/10 border border-amber-700/25 mb-5">
             <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
             <span className="text-[11px] text-amber-200/90">
@@ -107,10 +226,10 @@ export function InfrastructurePage() {
                   <Network className="w-3.5 h-3.5 text-accent-500" />
                   <SectionLabel>Infrastructure Relationships</SectionLabel>
                 </div>
-                <Badge variant="neutral">{nodes.length} nodes · {edges.length} edges</Badge>
+                <Badge variant="neutral">{infraNodes.length} nodes · {infraEdges.length} edges</Badge>
               </div>
-              {nodes.length > 0 ? (
-                <RelationshipGraph nodes={nodes} edges={edges} />
+              {infraNodes.length > 0 ? (
+                <RelationshipGraph nodes={infraNodes} edges={infraEdges} />
               ) : (
                 <div className="h-80 flex items-center justify-center text-[12px] text-ink-600">
                   No infrastructure relationship data available
@@ -132,7 +251,7 @@ export function InfrastructurePage() {
                 </div>
               </div>
               {candidateGeo.length > 0 ? (
-                <GeoMap points={candidateGeo} nodes={nodes} />
+                <GeoMap points={candidateGeo} nodes={infraNodes} />
               ) : (
                 <div className="h-48 flex items-center justify-center text-[12px] text-ink-600">
                   No resolvable coordinates for this email
@@ -145,7 +264,6 @@ export function InfrastructurePage() {
             </Card>
           </div>
 
-          {/* Candidate source IPs — full detail, with evidence provenance */}
           <Card className="mt-5 p-5">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
@@ -161,7 +279,7 @@ export function InfrastructurePage() {
             {geoData.length > 0 ? (
               <div className="grid grid-cols-3 gap-4">
                 {geoData.map((geo) => (
-                  <CandidateIpCard key={geo.ip} geo={geo} status={intelStatus(geo, nodes)} />
+                  <CandidateIpCard key={geo.ip} geo={geo} status={intelStatus(geo, infraNodes)} />
                 ))}
               </div>
             ) : (
@@ -174,7 +292,7 @@ export function InfrastructurePage() {
   );
 }
 
-function CandidateIpCard({ geo, status }: { geo: GeoEntry; status: string | null }) {
+function CandidateIpCard({ geo, status }: { geo: MappedGeoEntry; status: string | null }) {
   return (
     <div className="panel-2 p-4">
       <div className="flex items-center justify-between mb-3">
@@ -190,12 +308,11 @@ function CandidateIpCard({ geo, status }: { geo: GeoEntry; status: string | null
       </div>
       <div className="space-y-2">
         <MiniField label="Country" value={geoValue(geo.country)} provenance="intel" />
-        <MiniField label="Region" value={null} provenance="intel" />
+        <MiniField label="Region" value={geoValue(geo.region)} provenance="intel" />
         <MiniField label="City" value={geoValue(geo.city)} provenance="intel" />
-        <MiniField label="ISP" value={geo.isp} provenance="intel" />
-        <MiniField label="ASN" value={geo.asn} provenance="intel" />
-        <MiniField label="Hosting / Org" value={null} provenance="intel" />
-        <MiniField label="Location Confidence" value={null} provenance="intel" />
+        <MiniField label="ISP" value={geoValue(geo.isp)} provenance="intel" />
+        <MiniField label="ASN" value={geoValue(geo.asn)} provenance="intel" />
+        <MiniField label="Hosting / Org" value={geoValue(geo.hosting || geo.organization)} provenance="intel" />
         <MiniField label="Observed In" value="Received chain / header IP" provenance="observed" />
       </div>
     </div>
@@ -204,7 +321,7 @@ function CandidateIpCard({ geo, status }: { geo: GeoEntry; status: string | null
 
 function MiniField({ label, value, provenance }: { label: string; value: string | null; provenance: 'observed' | 'intel' | 'inferred' }) {
   const ProvenanceIcon = provenance === 'observed' ? Eye : provenance === 'intel' ? Radar : Sparkles;
-  const isUnavailable = value === null;
+  const isUnavailable = value === null || value === 'INCONCLUSIVE';
   return (
     <div className="flex items-center justify-between gap-2">
       <span className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-ink-600 font-semibold shrink-0">
@@ -215,21 +332,19 @@ function MiniField({ label, value, provenance }: { label: string; value: string 
           <ShieldQuestion className="w-2.5 h-2.5" /> UNAVAILABLE
         </span>
       ) : (
-        <span className={cn('mono text-[11px] text-ink-300 truncate', value === 'INCONCLUSIVE' && 'text-ink-500 italic')}>{value}</span>
+        <span className="mono text-[11px] text-ink-300 truncate">{value}</span>
       )}
     </div>
   );
 }
 
-function GeoMap({ points, nodes }: { points: GeoEntry[]; nodes: InfraNode[] }) {
-  // Simple equirectangular plot: lon -180..180 → x 0..360, lat 90..-90 → y 0..180.
+function GeoMap({ points, nodes }: { points: MappedGeoEntry[]; nodes: InfraNode[] }) {
   const toX = (lon: number) => ((lon + 180) / 360) * 360;
   const toY = (lat: number) => ((90 - lat) / 180) * 180;
 
   return (
     <div className="relative w-full h-48 bg-base-950/40 rounded-lg border border-base-500/15 overflow-hidden">
       <svg className="absolute inset-0 w-full h-full" viewBox="0 0 360 180" preserveAspectRatio="xMidYMid meet">
-        {/* Reference grid */}
         <line x1="0" y1="90" x2="360" y2="90" stroke="rgba(115,115,115,0.15)" strokeWidth="0.5" />
         <line x1="180" y1="0" x2="180" y2="180" stroke="rgba(115,115,115,0.15)" strokeWidth="0.5" />
         {Array.from({ length: 7 }, (_, i) => (i + 1) * 45).map((x) => (
@@ -241,7 +356,7 @@ function GeoMap({ points, nodes }: { points: GeoEntry[]; nodes: InfraNode[] }) {
 
         {points.map((geo) => {
           const match = nodes.find((n) => n.type === 'ip' && n.label === geo.ip);
-          const color = match?.status === 'malicious' ? '#dc2626' : match?.status === 'suspicious' ? '#f59e0b' : '#10b981';
+          const color = match?.status === 'malicious' ? '#dc2626' : match?.status === 'suspicious' ? '#f59e0b' : match?.status === 'clean' ? '#10b981' : '#737373';
           const cx = toX(geo.lon);
           const cy = toY(geo.lat);
           return (
@@ -338,71 +453,34 @@ function LegendItem({ color, label }: { color: string; label: string }) {
   );
 }
 
-/**
- * Infrastructure-only single-click preview — candidate IP count + top
- * candidate's full geo/intel field set, per the doc. Uses "PROBABLE
- * INFRASTRUCTURE" framing, never "attacker location." Fields the mock
- * dataset doesn't carry (region, hosting type, location confidence) render
- * as UNAVAILABLE rather than a guess.
- */
-function renderInfrastructurePreview(email: ScannedEmail, onInvestigate: () => void) {
-  const nodes = email.infraNodes ?? [];
-  const geoData = email.geoData ?? [];
-  const candidates = geoData.filter((g) => !(g.lat === 0 && g.lon === 0));
-  const top = candidates[0] ?? geoData[0] ?? null;
-  const topStatus = top ? intelStatus(top, nodes) : null;
-
+function renderInfrastructurePreview(email: any, onInvestigate: () => void) {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between mb-4">
         <SectionLabel>Probable Infrastructure</SectionLabel>
-        <Badge variant="neutral">{geoData.length} candidate IPs</Badge>
+        <Badge variant="neutral">Extraction Pending</Badge>
       </div>
 
       <div className="min-w-0 mb-4">
-        <div className="text-[13px] font-semibold text-ink-100 leading-snug truncate">{email.subject}</div>
-        <div className="mono text-[10px] text-ink-500 mt-1">{email.caseId || email.id}</div>
+        <div className="text-[13px] font-semibold text-ink-100 leading-snug truncate">
+          {email.subject || 'No Subject'}
+        </div>
+        <div className="mono text-[10px] text-ink-500 mt-1">
+          {email.caseId || email.id}
+        </div>
       </div>
 
-      {top ? (
-        <>
-          <div className="flex items-center gap-2.5 mb-4">
-            <div className="flex items-center justify-center w-8 h-6 rounded bg-base-600/50 border border-base-500/30 shrink-0">
-              <span className="text-[9px] font-bold text-ink-400 mono">{top.flag}</span>
-            </div>
-            <span className="mono text-[13px] text-ink-100">{top.ip}</span>
-            <span className={cn('ml-auto text-[9px] font-bold uppercase tracking-wider', intelColor(topStatus))}>
-              {topStatus ?? 'UNAVAILABLE'}
-            </span>
-          </div>
+      <Card className="flex flex-col items-center justify-center py-12 border-dashed border-base-500/30 bg-base-900/30 mb-5">
+        <Network className="w-8 h-8 text-ink-600 mb-3" />
+        <div className="text-[12px] font-semibold text-ink-300 mb-1">
+          Infrastructure Not Mapped
+        </div>
+        <div className="text-[11px] text-ink-500 text-center max-w-[200px] leading-relaxed">
+          Open the full investigation to parse IP geolocation and relationship graphs.
+        </div>
+      </Card>
 
-          <div className="grid grid-cols-2 gap-2.5 mb-4">
-            <PreviewField label="Country" value={geoValue(top.country)} />
-            <PreviewField label="Region" value="UNAVAILABLE" />
-            <PreviewField label="City" value={geoValue(top.city)} />
-            <PreviewField label="ISP" value={top.isp} mono />
-            <PreviewField label="ASN" value={top.asn} mono />
-            <PreviewField label="Hosting Type" value="UNAVAILABLE" />
-            <PreviewField label="Location Confidence" value="UNAVAILABLE" />
-            <PreviewField label="Intelligence Status" value={topStatus ?? 'UNAVAILABLE'} />
-          </div>
-
-          {candidates.length > 1 && (
-            <>
-              <SectionLabel className="block mb-2">Other Candidate IPs</SectionLabel>
-              <div className="space-y-1 mb-5">
-                {candidates.slice(1).map((g) => (
-                  <div key={g.ip} className="mono text-[10px] text-ink-500 panel-2 px-2 py-1.5">{g.ip}</div>
-                ))}
-              </div>
-            </>
-          )}
-        </>
-      ) : (
-        <div className="text-[11px] text-ink-600 mb-5">No candidate IPs resolved for this email</div>
-      )}
-
-      <PreviewInvestigateButton label="View Infrastructure Map" onClick={onInvestigate} />
+      <PreviewInvestigateButton label="Map Infrastructure" onClick={onInvestigate} />
     </div>
   );
 }

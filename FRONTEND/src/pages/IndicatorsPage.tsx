@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Flag, Search, Filter, Globe, Link2, Hash, Mail, Server, X, ShieldQuestion } from 'lucide-react';
 import { Card, SectionLabel, Badge, Divider } from '@/components/ui/Primitives';
@@ -9,8 +9,8 @@ import {
   PreviewField,
   PreviewInvestigateButton,
 } from '@/components/InvestigationWorkspace';
-import type { ScannedEmail, ThreatIndicator } from '@/data/mockData';
 import { cn } from '@/lib/utils';
+import { getEmail as fetchEmailDetails } from '@/api/api';
 
 const IOC_TYPES = ['IP', 'Domain', 'URL', 'Hash', 'Email'] as const;
 type IocType = (typeof IOC_TYPES)[number];
@@ -31,11 +31,17 @@ const typeSectionLabel: Record<IocType, string> = {
   Email: 'Email Addresses',
 };
 
-/**
- * The mock dataset only carries a raw reputation enum. This maps it onto the
- * doc's actual status vocabulary — no new judgment is introduced, "unknown"
- * (no intel present) becomes "Unavailable" rather than being hidden or guessed at.
- */
+export interface ThreatIndicator {
+  id: string;
+  type: IocType;
+  value: string;
+  reputation: 'malicious' | 'suspicious' | 'clean' | 'unknown';
+  source: string;
+  firstSeen: string;
+  lastSeen: string;
+  tags: string[];
+}
+
 function statusLabel(rep: ThreatIndicator['reputation']): string {
   switch (rep) {
     case 'malicious': return 'Malicious';
@@ -72,40 +78,61 @@ interface DetailField {
   value: string | null;
 }
 
-/**
- * Builds the IOC detail-drawer field set. Every field is either pulled
- * directly from existing data (the shared indicator record, or the email's
- * existing geoData for IPs) or deterministically parsed from the IOC's own
- * value (TLD, hostname, HTTPS, path depth). Nothing here is invented threat
- * intelligence — anything the backend hasn't supplied yet is `null` and
- * renders as UNAVAILABLE, ready to be filled in by GET /api/v1/emails/:emailId.
- */
-function getIocDetailFields(ioc: ThreatIndicator, email: ScannedEmail): DetailField[] {
+function mapDetailedApiToIndicators(apiData: any): ThreatIndicator[] {
+  const indicators: ThreatIndicator[] = [];
+  const iocs = apiData.iocs || {};
+
+  const mapGroup = (items: string[], type: IocType, source: string) => {
+    (items || []).forEach((value, index) => {
+      indicators.push({
+        id: `${type}-${index}-${value}`,
+        type,
+        value,
+        reputation: 'unknown',
+        source,
+        firstSeen: apiData.evidence?.createdAt || 'Unknown',
+        lastSeen: apiData.evidence?.createdAt || 'Unknown',
+        tags: []
+      });
+    });
+  };
+
+  mapGroup(iocs.ips, 'IP', 'Header Analysis');
+  mapGroup(iocs.domains, 'Domain', 'Domain Extraction');
+  mapGroup(iocs.urls, 'URL', 'Body Parsing');
+  mapGroup(iocs.hashes, 'Hash', 'Attachment Scanner');
+  mapGroup(iocs.emails, 'Email', 'Header Analysis');
+
+  return indicators;
+}
+
+function getIocDetailFields(ioc: ThreatIndicator, emailData: any): DetailField[] {
   if (ioc.type === 'IP') {
-    const geo = email.geoData.find((g) => g.ip === ioc.value);
+    const ipIntel = emailData?.infrastructure?.ipIntelligence?.find((g: any) => g.ip === ioc.value) || {};
     return [
       { label: 'Address', value: ioc.value },
       { label: 'Classification', value: statusLabel(ioc.reputation) },
-      { label: 'Country', value: geo?.country ?? null },
-      { label: 'Region', value: null },
-      { label: 'City', value: geo?.city ?? null },
-      { label: 'ISP', value: geo?.isp ?? null },
-      { label: 'ASN', value: geo?.asn ?? null },
-      { label: 'Hosting / Organization', value: null },
+      { label: 'Country', value: ipIntel.country ?? null },
+      { label: 'Region', value: ipIntel.region ?? null },
+      { label: 'City', value: ipIntel.city ?? null },
+      { label: 'ISP', value: ipIntel.isp ?? null },
+      { label: 'ASN', value: ipIntel.asn ?? null },
+      { label: 'Hosting / Organization', value: ipIntel.organization || ipIntel.hosting || null },
       { label: 'Confidence', value: null },
       { label: 'Evidence Source', value: ioc.source },
     ];
   }
   if (ioc.type === 'Domain') {
+    const domainIntel = emailData?.infrastructure?.domainIntelligence?.find((d: any) => d.domain === ioc.value) || {};
     const parts = ioc.value.split('.');
     const tld = parts.length > 1 ? `.${parts[parts.length - 1]}` : null;
     return [
       { label: 'Domain', value: ioc.value },
       { label: 'TLD', value: tld },
-      { label: 'Look-alike / Similarity Result', value: ioc.tags.includes('Lookalike') ? 'Flagged as look-alike domain' : null },
+      { label: 'Look-alike / Similarity Result', value: ioc.tags?.includes('Lookalike') ? 'Flagged as look-alike domain' : null },
       { label: 'DNS Information', value: null },
-      { label: 'MX Information', value: null },
-      { label: 'Domain Intelligence', value: null },
+      { label: 'MX Information', value: domainIntel.mxHosts?.join(', ') || null },
+      { label: 'Domain Intelligence', value: domainIntel.registrar || null },
       { label: 'Evidence Source', value: ioc.source },
     ];
   }
@@ -122,13 +149,16 @@ function getIocDetailFields(ioc: ThreatIndicator, email: ScannedEmail): DetailFi
       if (depth > 0) structure.push(`Path depth: ${depth}`);
       if (/^\d+\.\d+\.\d+\.\d+$/.test(u.hostname)) structure.push('Hostname is a raw IP literal');
     } catch {
-      // Not a parseable absolute URL — leave derived fields unavailable.
+      // Unparseable URL
     }
-    const domainRelationship = hostname
-      ? hostname.endsWith(email.senderDomain)
+    
+    const senderDomain = emailData?.parsedEmail?.from?.[0]?.domain || '';
+    const domainRelationship = hostname && senderDomain
+      ? hostname.endsWith(senderDomain)
         ? 'Matches sender domain'
         : 'External to sender domain'
       : null;
+      
     return [
       { label: 'Full URL', value: ioc.value },
       { label: 'Hostname', value: hostname },
@@ -138,8 +168,7 @@ function getIocDetailFields(ioc: ThreatIndicator, email: ScannedEmail): DetailFi
       { label: 'Evidence Source', value: ioc.source },
     ];
   }
-  // Hash / Email — the doc doesn't specify a dedicated schema for these, so
-  // only the fields already present on the shared indicator record are shown.
+  
   return [
     { label: 'Value', value: ioc.value },
     { label: 'Classification', value: statusLabel(ioc.reputation) },
@@ -150,9 +179,9 @@ function getIocDetailFields(ioc: ThreatIndicator, email: ScannedEmail): DetailFi
 }
 
 export function IndicatorsPage() {
-  // Locally-owned selection — this page's own `indicatorsSelectedEmailId`.
   const location = useLocation();
-  const { getEmail, setLastViewed, availableEmails } = useActiveCase();
+  const { setLastViewed, availableEmails } = useActiveCase();
+  
   const [indicatorsSelectedEmailId, setIndicatorsSelectedEmailId] = useState<string | null>(
     (location.state as { emailId?: string } | null)?.emailId ?? null
   );
@@ -160,26 +189,61 @@ export function IndicatorsPage() {
   const [query, setQuery] = useState('');
   const [drawerIoc, setDrawerIoc] = useState<ThreatIndicator | null>(null);
 
-  const activeEmail = useMemo(() => getEmail(indicatorsSelectedEmailId), [getEmail, indicatorsSelectedEmailId]);
+  const [activeEmailData, setActiveEmailData] = useState<any | null>(null);
+  const [liveIndicators, setLiveIndicators] = useState<ThreatIndicator[]>([]);
+  const [isLoadingDetails, setIsLoadingDetails] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
 
-  const handleInvestigate = (email: ScannedEmail) => {
-    setIndicatorsSelectedEmailId(email.id);
-    setLastViewed(email.id);
+  useEffect(() => {
+    if (!indicatorsSelectedEmailId) {
+      setActiveEmailData(null);
+      setLiveIndicators([]);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingDetails(true);
+    setDetailsError(null);
+
+    fetchEmailDetails(indicatorsSelectedEmailId)
+      .then((data) => {
+        if (!cancelled) {
+          setActiveEmailData(data);
+          setLiveIndicators(mapDetailedApiToIndicators(data));
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setDetailsError(err instanceof Error ? err.message : 'Failed to load indicators');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoadingDetails(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [indicatorsSelectedEmailId]);
+
+  const handleInvestigate = (emailId: string) => {
+    setIndicatorsSelectedEmailId(emailId);
+    setLastViewed(emailId);
     setDrawerIoc(null);
   };
 
-  const indicators = activeEmail?.indicators ?? [];
-
   const filtered = useMemo(() => {
-    return indicators.filter((ioc) => {
+    return liveIndicators.filter((ioc) => {
       const matchesType = filter === 'ALL' || ioc.type === filter;
       const matchesQuery =
         query === '' ||
         ioc.value.toLowerCase().includes(query.toLowerCase()) ||
-        ioc.tags.some((t) => t.toLowerCase().includes(query.toLowerCase()));
+        ioc.tags?.some((t) => t.toLowerCase().includes(query.toLowerCase()));
       return matchesType && matchesQuery;
     });
-  }, [indicators, filter, query]);
+  }, [liveIndicators, filter, query]);
 
   const grouped = useMemo(() => {
     const map = new Map<IocType, ThreatIndicator[]>();
@@ -193,31 +257,45 @@ export function IndicatorsPage() {
   }, [filtered]);
 
   const stats = useMemo(() => ({
-    total: indicators.length,
-    malicious: indicators.filter((i) => i.reputation === 'malicious').length,
-    suspicious: indicators.filter((i) => i.reputation === 'suspicious').length,
-    verified: indicators.filter((i) => i.reputation === 'clean').length,
-    unavailable: indicators.filter((i) => i.reputation === 'unknown').length,
-  }), [indicators]);
+    total: liveIndicators.length,
+    malicious: liveIndicators.filter((i) => i.reputation === 'malicious').length,
+    suspicious: liveIndicators.filter((i) => i.reputation === 'suspicious').length,
+    verified: liveIndicators.filter((i) => i.reputation === 'clean').length,
+    unavailable: liveIndicators.filter((i) => i.reputation === 'unknown').length,
+  }), [liveIndicators]);
 
-  const uniqueTypes = new Set(indicators.map((i) => i.type)).size;
+  const uniqueTypes = new Set(liveIndicators.map((i) => i.type)).size;
+  
+  const headerEmailContext = activeEmailData ? {
+    id: activeEmailData.emailId,
+    subject: activeEmailData.parsedEmail?.subject || 'No Subject',
+    caseId: activeEmailData.caseId
+  } : null;
 
   return (
     <InvestigationShell
       breadcrumb="Indicators"
       title="Indicators of Compromise"
-      subtitle={activeEmail ? `${stats.total} indicators across ${uniqueTypes} types · ${activeEmail.id}` : undefined}
-      hideCaseSelector={!activeEmail}
-      selectedEmail={activeEmail}
+      subtitle={activeEmailData ? `${stats.total} indicators across ${uniqueTypes} types · ${activeEmailData.emailId}` : undefined}
+      hideCaseSelector={!activeEmailData}
+      selectedEmail={headerEmailContext as any}
       availableEmails={availableEmails}
       onSelectEmail={(id) => { setIndicatorsSelectedEmailId(id); setLastViewed(id); setDrawerIoc(null); }}
       onClearEmail={() => { setIndicatorsSelectedEmailId(null); setDrawerIoc(null); }}
-      investigationNav={activeEmail ? { emailId: activeEmail.id, activeSection: 'indicators' } : undefined}
+      investigationNav={activeEmailData ? { emailId: activeEmailData.emailId, activeSection: 'indicators' } : undefined}
     >
-      {!activeEmail ? (
-        <InvestigationWorkspace onInvestigate={handleInvestigate} renderPreview={renderIndicatorsPreview} />
+      {isLoadingDetails ? (
+        <div className="flex items-center justify-center h-[500px] w-full text-ink-400 font-mono text-sm animate-pulse">
+          Extracting indicators...
+        </div>
+      ) : detailsError ? (
+        <div className="flex items-center justify-center h-[500px] w-full text-accent-500 font-mono text-sm">
+          Error: {detailsError}
+        </div>
+      ) : !activeEmailData ? (
+        <InvestigationWorkspace onInvestigate={(e: any) => handleInvestigate(e.id)} renderPreview={renderIndicatorsPreview} />
       ) : (
-        <div key={activeEmail.id} className="animate-fade-in">
+        <div key={activeEmailData.emailId} className="animate-fade-in">
           <div className="grid grid-cols-5 gap-4 mb-6">
             <StatCard label="Total IOCs" value={stats.total} />
             <StatCard label="Malicious" value={stats.malicious} variant="danger" />
@@ -255,7 +333,6 @@ export function IndicatorsPage() {
             </div>
           </div>
 
-          {/* Grouped by IOC type, per the doc's IPs / Domains / URLs / Hashes / Email Addresses layout */}
           {grouped.size > 0 ? (
             <div className="space-y-5">
               {IOC_TYPES.filter((t) => grouped.has(t)).map((type) => (
@@ -270,7 +347,7 @@ export function IndicatorsPage() {
           )}
 
           {drawerIoc && (
-            <IocDetailDrawer ioc={drawerIoc} email={activeEmail} onClose={() => setDrawerIoc(null)} />
+            <IocDetailDrawer ioc={drawerIoc} emailData={activeEmailData} onClose={() => setDrawerIoc(null)} />
           )}
         </div>
       )}
@@ -303,7 +380,7 @@ function IocSection({ type, items, onOpen }: { type: IocType; items: ThreatIndic
             </span>
             <span className="text-[10px] text-ink-600 shrink-0 hidden md:inline">{ioc.source}</span>
             <div className="flex flex-wrap gap-1 shrink-0 max-w-[180px] justify-end">
-              {ioc.tags.slice(0, 2).map((tag) => (
+              {ioc.tags?.slice(0, 2).map((tag) => (
                 <span key={tag} className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-base-600/40 text-ink-500 border border-base-500/20 uppercase tracking-wider">
                   {tag}
                 </span>
@@ -316,9 +393,9 @@ function IocSection({ type, items, onOpen }: { type: IocType; items: ThreatIndic
   );
 }
 
-function IocDetailDrawer({ ioc, email, onClose }: { ioc: ThreatIndicator; email: ScannedEmail; onClose: () => void }) {
+function IocDetailDrawer({ ioc, emailData, onClose }: { ioc: ThreatIndicator; emailData: any; onClose: () => void }) {
   const Icon = typeIcons[ioc.type] || Flag;
-  const fields = getIocDetailFields(ioc, email);
+  const fields = getIocDetailFields(ioc, emailData);
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end" role="dialog" aria-modal="true">
@@ -364,7 +441,7 @@ function IocDetailDrawer({ ioc, email, onClose }: { ioc: ThreatIndicator; email:
             <PreviewField label="Last Seen" value={ioc.lastSeen} mono />
           </div>
 
-          {ioc.tags.length > 0 && (
+          {ioc.tags?.length > 0 && (
             <>
               <SectionLabel className="block mb-2.5">Tags</SectionLabel>
               <div className="flex flex-wrap gap-1.5">
@@ -406,65 +483,34 @@ function StatCard({ label, value, variant }: { label: string; value: number; var
   );
 }
 
-/**
- * Indicators-only single-click preview — type counts (IP/Domain/URL/Hash/
- * Email) plus the highest-severity example per type, per the doc. Reputation
- * is shown using the doc's actual status vocabulary; nothing is fabricated —
- * an indicator with no intel is labeled Unavailable, not guessed at.
- */
-function renderIndicatorsPreview(email: ScannedEmail, onInvestigate: () => void) {
-  const iocs = email.indicators;
-  const counts = IOC_TYPES.map((type) => ({ type, count: iocs.filter((i) => i.type === type).length }));
-  const topByType = IOC_TYPES.map((type) => {
-    const items = iocs.filter((i) => i.type === type).sort((a, b) => severityRank[a.reputation] - severityRank[b.reputation]);
-    return items[0] ?? null;
-  }).filter((i): i is ThreatIndicator => i !== null);
-
+function renderIndicatorsPreview(email: any, onInvestigate: () => void) {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between mb-4">
         <SectionLabel>Indicators Preview</SectionLabel>
-        <Badge variant="neutral">{iocs.length} total</Badge>
+        <Badge variant="neutral">Extraction Pending</Badge>
       </div>
 
       <div className="min-w-0 mb-4">
-        <div className="text-[13px] font-semibold text-ink-100 leading-snug truncate">{email.subject}</div>
-        <div className="mono text-[10px] text-ink-500 mt-1">{email.caseId || email.id}</div>
-      </div>
-
-      <SectionLabel className="block mb-2.5">Indicator Counts</SectionLabel>
-      <div className="grid grid-cols-5 gap-1.5 mb-4">
-        {counts.map(({ type, count }) => (
-          <div key={type} className="panel-2 p-2 text-center">
-            <div className="text-[13px] font-bold text-ink-200 tabular-nums leading-none">{count}</div>
-            <div className="text-[8px] text-ink-600 uppercase tracking-wider mt-1">{type}</div>
-          </div>
-        ))}
-      </div>
-
-      <SectionLabel className="block mb-2.5">Most Important Indicators</SectionLabel>
-      {topByType.length > 0 ? (
-        <div className="space-y-1.5 mb-5">
-          {topByType.map((ioc) => (
-            <div key={ioc.id} className="text-[11px] panel-2 px-2.5 py-2">
-              <div className="flex items-center gap-2">
-                <span className="mono text-ink-600 shrink-0 w-11 uppercase text-[9px]">{ioc.type}:</span>
-                <span className="text-ink-300 truncate mono flex-1">{ioc.value}</span>
-              </div>
-              <div className="flex items-center gap-1.5 mt-1 pl-[52px]">
-                <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', statusDot(ioc.reputation))} />
-                <span className={cn('text-[9px] font-semibold uppercase tracking-wider', statusColor(ioc.reputation))}>
-                  {statusLabel(ioc.reputation)}
-                </span>
-              </div>
-            </div>
-          ))}
+        <div className="text-[13px] font-semibold text-ink-100 leading-snug truncate">
+          {email.subject || 'No Subject'}
         </div>
-      ) : (
-        <div className="text-[11px] text-ink-600 mb-5">No indicators for this email</div>
-      )}
+        <div className="mono text-[10px] text-ink-500 mt-1">
+          {email.caseId || email.id}
+        </div>
+      </div>
 
-      <PreviewInvestigateButton label="View All Indicators" onClick={onInvestigate} />
+      <Card className="flex flex-col items-center justify-center py-12 border-dashed border-base-500/30 bg-base-900/30 mb-5">
+        <Search className="w-8 h-8 text-ink-600 mb-3" />
+        <div className="text-[12px] font-semibold text-ink-300 mb-1">
+          Indicators Not Extracted
+        </div>
+        <div className="text-[11px] text-ink-500 text-center max-w-[200px] leading-relaxed">
+          Open the full investigation to parse IPs, domains, URLs, and hashes from this email.
+        </div>
+      </Card>
+
+      <PreviewInvestigateButton label="Extract & View Indicators" onClick={onInvestigate} />
     </div>
   );
 }
