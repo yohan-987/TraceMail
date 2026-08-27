@@ -1,0 +1,7 @@
+From: newsletter@example.com
+To: subscriber@example.org
+Subject: Weekly digest
+Message-ID: <digest-2026-08-24@example.com>
+Authentication-Results: mx.google.com; spf=pass; dkim=pass; dmarc=pass
+
+Here is your weekly digest of company news and updates.

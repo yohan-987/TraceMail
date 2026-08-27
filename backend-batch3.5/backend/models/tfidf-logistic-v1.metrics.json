@@ -1,0 +1,30 @@
+{
+  "note": "Prototype hold-out metrics. Not production accuracy. Probability is an uncalibrated model score.",
+  "test": {
+    "precision": 1,
+    "recall": 0.8333333333333334,
+    "f1": 0.9090909090909091,
+    "confusionMatrix": {
+      "truePositive": 5,
+      "falsePositive": 0,
+      "trueNegative": 7,
+      "falseNegative": 1
+    },
+    "splitSizes": {
+      "train": 56,
+      "validation": 12,
+      "test": 13
+    }
+  },
+  "validation": {
+    "precision": 1,
+    "recall": 0.8333333333333334,
+    "f1": 0.9090909090909091,
+    "confusionMatrix": {
+      "truePositive": 5,
+      "falsePositive": 0,
+      "trueNegative": 6,
+      "falseNegative": 1
+    }
+  }
+}

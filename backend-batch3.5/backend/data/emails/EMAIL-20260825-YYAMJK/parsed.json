@@ -1,0 +1,448 @@
+{
+  "emailId": "EMAIL-20260825-YYAMJK",
+  "caseId": null,
+  "evidence": {
+    "filename": "urgent.eml",
+    "sha256": "6dfff8508464feacda2db295b82ea4f6a528b653b880c8c78d6738184504374a",
+    "fileSizeBytes": 567,
+    "createdAt": "2026-08-25T14:42:46.637Z",
+    "storagePath": "data\\emails\\EMAIL-20260825-YYAMJK\\original.eml"
+  },
+  "parsedEmail": {
+    "emailId": "EMAIL-20260825-YYAMJK",
+    "subject": "Urgent wire transfer",
+    "from": [
+      {
+        "displayName": "CEO",
+        "email": "ceo@company-example.com",
+        "localPart": "ceo",
+        "domain": "company-example.com"
+      }
+    ],
+    "to": [
+      {
+        "displayName": null,
+        "email": "victim@company-example.com",
+        "localPart": "victim",
+        "domain": "company-example.com"
+      }
+    ],
+    "cc": [],
+    "bcc": [],
+    "replyTo": [
+      {
+        "displayName": null,
+        "email": "finance-request@gmail.com",
+        "localPart": "finance-request",
+        "domain": "gmail.com"
+      }
+    ],
+    "returnPath": [],
+    "date": null,
+    "messageId": "<weird-id@totally-unrelated.net>",
+    "headers": {
+      "normalized": {
+        "from": "\"CEO\" <ceo@company-example.com>",
+        "reply-to": "finance-request@gmail.com",
+        "to": "victim@company-example.com",
+        "subject": "Urgent wire transfer",
+        "message-id": "<weird-id@totally-unrelated.net>",
+        "received": "from mail.company-example.com (mail.company-example.com [203.0.113.9]) by mx.company-example.com; Mon, 24 Aug 2026 09:00:00 +0000",
+        "authentication-results": "mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com"
+      },
+      "raw": [
+        {
+          "name": "from",
+          "value": "From: \"CEO\" <ceo@company-example.com>"
+        },
+        {
+          "name": "reply-to",
+          "value": "Reply-To: finance-request@gmail.com"
+        },
+        {
+          "name": "to",
+          "value": "To: victim@company-example.com"
+        },
+        {
+          "name": "subject",
+          "value": "Subject: Urgent wire transfer"
+        },
+        {
+          "name": "message-id",
+          "value": "Message-ID: <weird-id@totally-unrelated.net>"
+        },
+        {
+          "name": "received",
+          "value": "Received: from mail.company-example.com (mail.company-example.com [203.0.113.9]) by mx.company-example.com; Mon, 24 Aug 2026 09:00:00 +0000"
+        },
+        {
+          "name": "authentication-results",
+          "value": "Authentication-Results: mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com"
+        }
+      ]
+    },
+    "body": {
+      "text": "Please wire the funds immediately, this is time sensitive.\n",
+      "html": null
+    },
+    "attachments": []
+  },
+  "headerAnalysis": {
+    "emailId": "EMAIL-20260825-YYAMJK",
+    "anomalies": [
+      {
+        "type": "reply_to_mismatch",
+        "severity": "medium",
+        "weight": 40,
+        "message": "Reply-To domain (gmail.com) differs from the sender domain (company-example.com).",
+        "evidence": {
+          "fromDomain": "company-example.com",
+          "replyToDomain": "gmail.com"
+        },
+        "category": "identity",
+        "provenance": "DETERMINISTIC_ANALYSIS"
+      },
+      {
+        "type": "message_id_domain_mismatch",
+        "severity": "low",
+        "weight": 10,
+        "message": "Message-ID domain (totally-unrelated.net) differs from the sender domain (company-example.com).",
+        "evidence": {
+          "messageIdDomain": "totally-unrelated.net",
+          "fromDomain": "company-example.com"
+        },
+        "category": "identity",
+        "provenance": "DETERMINISTIC_ANALYSIS"
+      },
+      {
+        "type": "spf_fail",
+        "severity": "high",
+        "weight": 25,
+        "message": "SPF authentication failed.",
+        "evidence": {
+          "spf": "mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com"
+        },
+        "category": "technical",
+        "provenance": "DETERMINISTIC_ANALYSIS"
+      },
+      {
+        "type": "dkim_fail",
+        "severity": "high",
+        "weight": 25,
+        "message": "DKIM signature verification failed.",
+        "evidence": {
+          "dkim": "mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com"
+        },
+        "category": "technical",
+        "provenance": "DETERMINISTIC_ANALYSIS"
+      },
+      {
+        "type": "dmarc_fail",
+        "severity": "high",
+        "weight": 30,
+        "message": "DMARC alignment failed.",
+        "evidence": {
+          "dmarc": "mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com",
+          "policy": "reject"
+        },
+        "category": "technical",
+        "provenance": "DETERMINISTIC_ANALYSIS"
+      }
+    ],
+    "receivedChain": [
+      {
+        "hop": 1,
+        "fromHostname": "mail.company-example.com",
+        "fromIp": "203.0.113.9",
+        "fromIpClassification": "PUBLIC",
+        "byHostname": "mx.company-example.com",
+        "timestampRaw": "Mon, 24 Aug 2026 09:00:00 +0000",
+        "timestampIso": "2026-08-24T09:00:00.000Z",
+        "rawHeader": "Received: from mail.company-example.com (mail.company-example.com [203.0.113.9]) by mx.company-example.com; Mon, 24 Aug 2026 09:00:00 +0000"
+      }
+    ],
+    "status": "SUSPICIOUS"
+  },
+  "authentication": {
+    "emailId": "EMAIL-20260825-YYAMJK",
+    "spf": {
+      "result": "fail",
+      "raw": "mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com"
+    },
+    "dkim": {
+      "result": "fail",
+      "raw": "mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com"
+    },
+    "dmarc": {
+      "result": "fail",
+      "policy": "reject",
+      "raw": "mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com"
+    }
+  },
+  "iocs": {
+    "emailId": "EMAIL-20260825-YYAMJK",
+    "ips": [
+      "203.0.113.9"
+    ],
+    "domains": [
+      "company-example.com",
+      "gmail.com"
+    ],
+    "urls": [],
+    "hashes": [],
+    "emails": [
+      "ceo@company-example.com",
+      "victim@company-example.com",
+      "finance-request@gmail.com"
+    ]
+  },
+  "urlAnalysis": {
+    "emailId": "EMAIL-20260825-YYAMJK",
+    "urls": []
+  },
+  "domainAnalysis": {
+    "emailId": "EMAIL-20260825-YYAMJK",
+    "domains": [
+      {
+        "domain": "company-example.com",
+        "tld": "com",
+        "subdomain": null,
+        "hostnameLength": 19,
+        "hyphenCount": 1,
+        "digitCount": 0,
+        "isPunycode": false,
+        "lookalikeOf": null,
+        "similarityScore": null
+      },
+      {
+        "domain": "gmail.com",
+        "tld": "com",
+        "subdomain": null,
+        "hostnameLength": 9,
+        "hyphenCount": 0,
+        "digitCount": 0,
+        "isPunycode": false,
+        "lookalikeOf": null,
+        "similarityScore": null
+      }
+    ]
+  },
+  "risk": {
+    "emailId": "EMAIL-20260825-YYAMJK",
+    "categoryScores": {
+      "technical": {
+        "score": 61,
+        "status": "AVAILABLE",
+        "evidence": [
+          {
+            "type": "spf_fail",
+            "severity": "high",
+            "weight": 25,
+            "message": "SPF authentication failed.",
+            "evidence": {
+              "spf": "mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com"
+            },
+            "category": "technical",
+            "provenance": "DETERMINISTIC_ANALYSIS"
+          },
+          {
+            "type": "dkim_fail",
+            "severity": "high",
+            "weight": 25,
+            "message": "DKIM signature verification failed.",
+            "evidence": {
+              "dkim": "mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com"
+            },
+            "category": "technical",
+            "provenance": "DETERMINISTIC_ANALYSIS"
+          },
+          {
+            "type": "dmarc_fail",
+            "severity": "high",
+            "weight": 30,
+            "message": "DMARC alignment failed.",
+            "evidence": {
+              "dmarc": "mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com",
+              "policy": "reject"
+            },
+            "category": "technical",
+            "provenance": "DETERMINISTIC_ANALYSIS"
+          }
+        ]
+      },
+      "identity": {
+        "score": 46,
+        "status": "AVAILABLE",
+        "evidence": [
+          {
+            "type": "reply_to_mismatch",
+            "severity": "medium",
+            "weight": 40,
+            "message": "Reply-To domain (gmail.com) differs from the sender domain (company-example.com).",
+            "evidence": {
+              "fromDomain": "company-example.com",
+              "replyToDomain": "gmail.com"
+            },
+            "category": "identity",
+            "provenance": "DETERMINISTIC_ANALYSIS"
+          },
+          {
+            "type": "message_id_domain_mismatch",
+            "severity": "low",
+            "weight": 10,
+            "message": "Message-ID domain (totally-unrelated.net) differs from the sender domain (company-example.com).",
+            "evidence": {
+              "messageIdDomain": "totally-unrelated.net",
+              "fromDomain": "company-example.com"
+            },
+            "category": "identity",
+            "provenance": "DETERMINISTIC_ANALYSIS"
+          }
+        ]
+      },
+      "urlDomain": {
+        "score": 0,
+        "status": "AVAILABLE",
+        "evidence": []
+      },
+      "content": {
+        "score": 36,
+        "status": "AVAILABLE",
+        "evidence": [
+          {
+            "type": "urgency_language",
+            "severity": "low",
+            "weight": 15,
+            "message": "Email content contains urgency language (matched: urgent, immediately, time sensitive).",
+            "evidence": {
+              "matchedKeywords": [
+                "urgent",
+                "immediately",
+                "time sensitive"
+              ]
+            },
+            "category": "content",
+            "provenance": "DETERMINISTIC_ANALYSIS"
+          },
+          {
+            "type": "financial_request_language",
+            "severity": "high",
+            "weight": 25,
+            "message": "Email content contains financial-request language (matched: wire transfer, wire the funds).",
+            "evidence": {
+              "matchedKeywords": [
+                "wire transfer",
+                "wire the funds"
+              ]
+            },
+            "category": "content",
+            "provenance": "DETERMINISTIC_ANALYSIS"
+          }
+        ]
+      },
+      "infrastructure": {
+        "score": null,
+        "status": "UNAVAILABLE",
+        "evidence": []
+      }
+    },
+    "score": 37,
+    "level": "moderate",
+    "classification": "financial_fraud",
+    "confidence": 0.85,
+    "evidenceCoverage": 0.8
+  },
+  "aiAssessment": null,
+  "infrastructure": null,
+  "report": null,
+  "explanations": [
+    {
+      "type": "reply_to_mismatch",
+      "severity": "medium",
+      "weight": 40,
+      "message": "Reply-To domain (gmail.com) differs from the sender domain (company-example.com).",
+      "evidence": {
+        "fromDomain": "company-example.com",
+        "replyToDomain": "gmail.com"
+      },
+      "category": "identity",
+      "provenance": "DETERMINISTIC_ANALYSIS"
+    },
+    {
+      "type": "message_id_domain_mismatch",
+      "severity": "low",
+      "weight": 10,
+      "message": "Message-ID domain (totally-unrelated.net) differs from the sender domain (company-example.com).",
+      "evidence": {
+        "messageIdDomain": "totally-unrelated.net",
+        "fromDomain": "company-example.com"
+      },
+      "category": "identity",
+      "provenance": "DETERMINISTIC_ANALYSIS"
+    },
+    {
+      "type": "spf_fail",
+      "severity": "high",
+      "weight": 25,
+      "message": "SPF authentication failed.",
+      "evidence": {
+        "spf": "mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com"
+      },
+      "category": "technical",
+      "provenance": "DETERMINISTIC_ANALYSIS"
+    },
+    {
+      "type": "dkim_fail",
+      "severity": "high",
+      "weight": 25,
+      "message": "DKIM signature verification failed.",
+      "evidence": {
+        "dkim": "mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com"
+      },
+      "category": "technical",
+      "provenance": "DETERMINISTIC_ANALYSIS"
+    },
+    {
+      "type": "dmarc_fail",
+      "severity": "high",
+      "weight": 30,
+      "message": "DMARC alignment failed.",
+      "evidence": {
+        "dmarc": "mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com",
+        "policy": "reject"
+      },
+      "category": "technical",
+      "provenance": "DETERMINISTIC_ANALYSIS"
+    },
+    {
+      "type": "urgency_language",
+      "severity": "low",
+      "weight": 15,
+      "message": "Email content contains urgency language (matched: urgent, immediately, time sensitive).",
+      "evidence": {
+        "matchedKeywords": [
+          "urgent",
+          "immediately",
+          "time sensitive"
+        ]
+      },
+      "category": "content",
+      "provenance": "DETERMINISTIC_ANALYSIS"
+    },
+    {
+      "type": "financial_request_language",
+      "severity": "high",
+      "weight": 25,
+      "message": "Email content contains financial-request language (matched: wire transfer, wire the funds).",
+      "evidence": {
+        "matchedKeywords": [
+          "wire transfer",
+          "wire the funds"
+        ]
+      },
+      "category": "content",
+      "provenance": "DETERMINISTIC_ANALYSIS"
+    }
+  ],
+  "warnings": []
+}

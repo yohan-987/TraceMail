@@ -1,0 +1,18 @@
+{
+  "emailId": "EMAIL-20260826-ESTZRK",
+  "caseId": null,
+  "filename": "no-case.eml",
+  "sender": "sender@example.com",
+  "senderDomain": "example.com",
+  "recipient": "recipient@example.com",
+  "subject": "Test scan",
+  "threatScore": 1,
+  "classification": "legitimate",
+  "status": "low",
+  "riskLevel": "low",
+  "date": "2026-08-26T19:00:03.283Z",
+  "analysisStatus": "SUSPICIOUS",
+  "createdAt": "2026-08-26T19:00:03.283Z",
+  "fromDomain": "example.com",
+  "riskScore": 1
+}

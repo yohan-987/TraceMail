@@ -1,0 +1,237 @@
+{
+  "emailId": "EMAIL-20260826-D5JY8T",
+  "caseId": null,
+  "evidence": {
+    "filename": "no-case.eml",
+    "sha256": "991926c4089e607d9f838202dbbbf253a6844237898d9e41c67b7d95f66f2bbc",
+    "fileSizeBytes": 62,
+    "createdAt": "2026-08-26T15:17:56.289Z",
+    "storagePath": "data\\emails\\EMAIL-20260826-D5JY8T\\original.eml"
+  },
+  "parsedEmail": {
+    "emailId": "EMAIL-20260826-D5JY8T",
+    "subject": "hi",
+    "from": [
+      {
+        "displayName": null,
+        "email": "a@example.com",
+        "localPart": "a",
+        "domain": "example.com"
+      }
+    ],
+    "to": [
+      {
+        "displayName": null,
+        "email": "b@example.com",
+        "localPart": "b",
+        "domain": "example.com"
+      }
+    ],
+    "cc": [],
+    "bcc": [],
+    "replyTo": [],
+    "returnPath": [],
+    "date": null,
+    "messageId": null,
+    "headers": {
+      "normalized": {
+        "from": "a@example.com",
+        "to": "b@example.com",
+        "subject": "hi"
+      },
+      "raw": [
+        {
+          "name": "from",
+          "value": "From: a@example.com"
+        },
+        {
+          "name": "to",
+          "value": "To: b@example.com"
+        },
+        {
+          "name": "subject",
+          "value": "Subject: hi"
+        }
+      ]
+    },
+    "body": {
+      "text": "hello\n",
+      "html": null
+    },
+    "attachments": []
+  },
+  "headerAnalysis": {
+    "emailId": "EMAIL-20260826-D5JY8T",
+    "anomalies": [
+      {
+        "type": "message_id_missing",
+        "severity": "low",
+        "weight": 5,
+        "message": "No Message-ID header was present.",
+        "evidence": {},
+        "category": "identity",
+        "provenance": "DETERMINISTIC_ANALYSIS"
+      }
+    ],
+    "receivedChain": [],
+    "status": "SUSPICIOUS"
+  },
+  "authentication": {
+    "emailId": "EMAIL-20260826-D5JY8T",
+    "spf": {
+      "result": "unknown",
+      "raw": null
+    },
+    "dkim": {
+      "result": "unknown",
+      "raw": null
+    },
+    "dmarc": {
+      "result": "unknown",
+      "policy": null,
+      "raw": null
+    }
+  },
+  "iocs": {
+    "emailId": "EMAIL-20260826-D5JY8T",
+    "ips": [],
+    "domains": [
+      "example.com"
+    ],
+    "urls": [],
+    "hashes": [],
+    "emails": [
+      "a@example.com",
+      "b@example.com"
+    ]
+  },
+  "urlAnalysis": {
+    "emailId": "EMAIL-20260826-D5JY8T",
+    "urls": []
+  },
+  "domainAnalysis": {
+    "emailId": "EMAIL-20260826-D5JY8T",
+    "domains": [
+      {
+        "domain": "example.com",
+        "tld": "com",
+        "subdomain": null,
+        "hostnameLength": 11,
+        "hyphenCount": 0,
+        "digitCount": 0,
+        "isPunycode": false,
+        "lookalikeOf": null,
+        "similarityScore": null
+      }
+    ]
+  },
+  "risk": {
+    "emailId": "EMAIL-20260826-D5JY8T",
+    "categoryScores": {
+      "technical": {
+        "score": 0,
+        "status": "AVAILABLE",
+        "evidence": []
+      },
+      "identity": {
+        "score": 5,
+        "status": "AVAILABLE",
+        "evidence": [
+          {
+            "type": "message_id_missing",
+            "severity": "low",
+            "weight": 5,
+            "message": "No Message-ID header was present.",
+            "evidence": {},
+            "category": "identity",
+            "provenance": "DETERMINISTIC_ANALYSIS"
+          }
+        ]
+      },
+      "urlDomain": {
+        "score": 0,
+        "status": "AVAILABLE",
+        "evidence": []
+      },
+      "content": {
+        "score": 0,
+        "status": "AVAILABLE",
+        "evidence": []
+      },
+      "infrastructure": {
+        "score": null,
+        "status": "UNAVAILABLE",
+        "evidence": []
+      }
+    },
+    "score": 1,
+    "level": "low",
+    "classification": "legitimate",
+    "confidence": 0.55,
+    "evidenceCoverage": 0.8
+  },
+  "aiAssessment": {
+    "emailId": "EMAIL-20260826-D5JY8T",
+    "status": "UNAVAILABLE",
+    "phishingIntent": null,
+    "credentialHarvesting": null,
+    "financialFraud": null,
+    "impersonation": null,
+    "socialEngineering": null,
+    "malwareDelivery": null,
+    "attackType": null,
+    "summary": null,
+    "recommendedActions": [],
+    "aiContentScore": null,
+    "provenance": "AI_INTERPRETATION"
+  },
+  "infrastructure": {
+    "emailId": "EMAIL-20260826-D5JY8T",
+    "candidateIp": null,
+    "country": null,
+    "region": null,
+    "city": null,
+    "isp": null,
+    "asn": null,
+    "confidence": null,
+    "status": "UNAVAILABLE",
+    "ipIntelligence": [],
+    "domainIntelligence": [
+      {
+        "domain": "example.com",
+        "resolvedIps": null,
+        "mxHosts": null,
+        "registrar": null,
+        "domainAgeDays": null,
+        "hostingOrganization": null,
+        "status": "UNAVAILABLE"
+      }
+    ],
+    "interpretation": "probable_infrastructure"
+  },
+  "report": null,
+  "explanations": [
+    {
+      "type": "message_id_missing",
+      "severity": "low",
+      "weight": 5,
+      "message": "No Message-ID header was present.",
+      "evidence": {},
+      "category": "identity",
+      "provenance": "DETERMINISTIC_ANALYSIS"
+    }
+  ],
+  "warnings": [],
+  "mlAssessment": {
+    "emailId": "EMAIL-20260826-D5JY8T",
+    "model": null,
+    "modelVersion": null,
+    "classification": null,
+    "probability": null,
+    "status": "UNAVAILABLE"
+  },
+  "intelligenceAssessment": {
+    "emailId": "EMAIL-20260826-D5JY8T",
+    "status": "UNAVAILABLE"
+  }
+}

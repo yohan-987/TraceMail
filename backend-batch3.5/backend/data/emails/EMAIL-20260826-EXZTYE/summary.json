@@ -1,0 +1,18 @@
+{
+  "emailId": "EMAIL-20260826-EXZTYE",
+  "caseId": null,
+  "filename": "urgent.eml",
+  "sender": "ceo@company-example.com",
+  "senderDomain": "company-example.com",
+  "recipient": "victim@company-example.com",
+  "subject": "Urgent wire transfer",
+  "threatScore": 37,
+  "classification": "financial_fraud",
+  "status": "moderate",
+  "riskLevel": "moderate",
+  "date": "2026-08-26T15:17:56.225Z",
+  "analysisStatus": "SUSPICIOUS",
+  "createdAt": "2026-08-26T15:17:56.225Z",
+  "fromDomain": "company-example.com",
+  "riskScore": 37
+}

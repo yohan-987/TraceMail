@@ -1,0 +1,9 @@
+From: "CEO" <ceo@company-example.com>
+Reply-To: finance-request@gmail.com
+To: victim@company-example.com
+Subject: Urgent wire transfer
+Message-ID: <weird-id@totally-unrelated.net>
+Received: from mail.company-example.com (mail.company-example.com [203.0.113.9]) by mx.company-example.com; Mon, 24 Aug 2026 09:00:00 +0000
+Authentication-Results: mx.google.com; spf=fail smtp.mailfrom=company-example.com; dkim=fail header.i=@company-example.com; dmarc=fail (p=REJECT) header.from=company-example.com
+
+Please wire the funds immediately, this is time sensitive.

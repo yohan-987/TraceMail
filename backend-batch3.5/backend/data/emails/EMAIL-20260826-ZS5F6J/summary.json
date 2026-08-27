@@ -1,0 +1,18 @@
+{
+  "emailId": "EMAIL-20260826-ZS5F6J",
+  "caseId": null,
+  "filename": "clean.eml",
+  "sender": "newsletter@example.com",
+  "senderDomain": "example.com",
+  "recipient": "subscriber@example.org",
+  "subject": "Weekly digest",
+  "threatScore": 0,
+  "classification": "legitimate",
+  "status": "low",
+  "riskLevel": "low",
+  "date": "2026-08-26T19:00:03.258Z",
+  "analysisStatus": "VERIFIED",
+  "createdAt": "2026-08-26T19:00:03.258Z",
+  "fromDomain": "example.com",
+  "riskScore": 0
+}

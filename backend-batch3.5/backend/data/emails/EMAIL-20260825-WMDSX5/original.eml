@@ -1,0 +1,10 @@
+From: "PayPal Security" <alert@paypa1-secure-login.com>
+Reply-To: support-team@gmail.com
+To: victim@example.org
+Subject: Urgent: verify your account immediately
+Message-ID: <weird@totally-unrelated.net>
+Received: from mail.paypa1-secure-login.com (mail.paypa1-secure-login.com [198.51.100.23]) by mx.example.org; Mon, 24 Aug 2026 10:00:00 +0000
+Authentication-Results: mx.google.com; spf=fail; dkim=fail; dmarc=fail (p=QUARANTINE)
+Content-Type: text/html
+
+<p>Your account has been suspended. <a href="http://203.0.113.44/verify">Click here</a> to verify your account immediately, or wire the funds to avoid suspension.</p>

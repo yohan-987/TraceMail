@@ -1,0 +1,18 @@
+{
+  "emailId": "EMAIL-20260826-NM56EN",
+  "caseId": null,
+  "filename": "phish.eml",
+  "sender": "alert@paypa1-secure-login.com",
+  "senderDomain": "paypa1-secure-login.com",
+  "recipient": "victim@example.org",
+  "subject": "Urgent: verify your account immediately",
+  "threatScore": 61,
+  "classification": "impersonation",
+  "status": "high",
+  "riskLevel": "high",
+  "date": "2026-08-26T19:00:03.234Z",
+  "analysisStatus": "SUSPICIOUS",
+  "createdAt": "2026-08-26T19:00:03.234Z",
+  "fromDomain": "paypa1-secure-login.com",
+  "riskScore": 61
+}

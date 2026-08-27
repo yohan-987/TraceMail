@@ -1,0 +1,18 @@
+{
+  "emailId": "EMAIL-20260826-XAYCWE",
+  "caseId": null,
+  "filename": "sample.eml",
+  "sender": "sender@example.com",
+  "senderDomain": "example.com",
+  "recipient": "recipient@example.com",
+  "subject": "Test scan",
+  "threatScore": 1,
+  "classification": "legitimate",
+  "status": "low",
+  "riskLevel": "low",
+  "date": "2026-08-26T15:17:56.267Z",
+  "analysisStatus": "SUSPICIOUS",
+  "createdAt": "2026-08-26T15:17:56.267Z",
+  "fromDomain": "example.com",
+  "riskScore": 1
+}

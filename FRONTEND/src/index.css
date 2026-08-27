@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    border-color: rgba(255, 255, 255, 0.04);
+  }
+
+  body {
+    background-color: #080808;
+    color: #F5F5F5;
+    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    letter-spacing: -0.01em;
+  }
+
+  ::selection {
+    background: rgba(208, 0, 0, 0.3);
+    color: #fff;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply bg-base-800/80 border border-base-500/40 rounded-xl;
+  }
+
+  .panel-2 {
+    @apply bg-base-700/60 border border-base-500/30 rounded-lg;
+  }
+
+  .section-label {
+    @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-ink-500;
+  }
+
+  .mono {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+
+  .threat-glow {
+    box-shadow: 0 0 24px -4px rgba(208, 0, 0, 0.35), 0 0 8px -2px rgba(208, 0, 0, 0.2);
+  }
+
+  .accent-glow-sm {
+    box-shadow: 0 0 12px -2px rgba(208, 0, 0, 0.25);
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: #333 transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: #333;
+    border-radius: 3px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
