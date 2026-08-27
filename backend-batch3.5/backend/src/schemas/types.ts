@@ -296,6 +296,45 @@ export interface ForensicReport {
   htmlAvailable: boolean;
 }
 
+// Derived infrastructure graph for one emailId (Batch 5A). Built on
+// demand from the stored EmailRecord — never a second database.
+export type InfrastructureGraphNodeType =
+  | "EMAIL"
+  | "EMAIL_ADDRESS"
+  | "DOMAIN"
+  | "URL"
+  | "IP"
+  | "ASN"
+  | "ORGANIZATION"
+  | "GEOLOCATION";
+
+export type GraphProvenance =
+  | "OBSERVED"
+  | "DETERMINISTIC_ANALYSIS"
+  | "EXTERNAL_INTELLIGENCE"
+  | "INFERRED";
+
+export interface InfrastructureGraphNode {
+  id: string;
+  type: InfrastructureGraphNodeType;
+  label: string;
+  status?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface InfrastructureGraphEdge {
+  source: string;
+  target: string;
+  relationship: string;
+  provenance: GraphProvenance;
+  evidence?: string[];
+}
+
+export interface InfrastructureGraph {
+  nodes: InfrastructureGraphNode[];
+  edges: InfrastructureGraphEdge[];
+}
+
 // --- Top-level record -------------------------------------------------
 
 export interface EvidenceMeta {

@@ -1,0 +1,18 @@
+{
+  "emailId": "EMAIL-20260827-89BMUU",
+  "caseId": null,
+  "filename": "stored.eml",
+  "sender": "a@example.com",
+  "senderDomain": "example.com",
+  "recipient": "b@example.com",
+  "subject": "stored",
+  "threatScore": 1,
+  "classification": "legitimate",
+  "status": "low",
+  "riskLevel": "low",
+  "date": "2026-08-27T23:05:23.779Z",
+  "analysisStatus": "SUSPICIOUS",
+  "createdAt": "2026-08-27T23:05:23.779Z",
+  "fromDomain": "example.com",
+  "riskScore": 1
+}

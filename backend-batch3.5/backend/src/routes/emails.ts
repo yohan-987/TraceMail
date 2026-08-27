@@ -14,6 +14,7 @@ import { computeRisk } from "../analyzers/riskEngine";
 import { assessMl, getDefaultPredictor, mlInputFromEmail } from "../analyzers/mlClassifier";
 import { assessAi } from "../analyzers/aiAssessment";
 import { analyzeInfrastructure } from "../analyzers/infrastructure";
+import { buildInfrastructureGraph } from "../analyzers/infrastructureGraph";
 import { geoIpProviderFromEnv } from "../services/geoipClient";
 import { dnsProviderFromEnv } from "../services/dnsClient";
 import { llmProviderFromEnv } from "../services/llmClient";
@@ -197,6 +198,25 @@ emailsRouter.get(
       const record = await getEmailRecord(req.params.emailId);
       if (!record) throw Errors.emailNotFound(req.params.emailId);
       return res.status(200).json(toPublicEmailRecord(record));
+    } catch (err) {
+      return next(err);
+    }
+  }
+);
+
+// GET /api/v1/emails/:emailId/graph — derived Cytoscape-ready graph for
+// one stored email. Pure projection of EmailRecord; does not re-run
+// parsers, ML, LLM, GeoIP, or DNS, and does not persist a second dataset.
+emailsRouter.get(
+  "/emails/:emailId/graph",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const record = await getEmailRecord(req.params.emailId);
+      if (!record) throw Errors.emailNotFound(req.params.emailId);
+      return res.status(200).json({
+        emailId: record.emailId,
+        graph: buildInfrastructureGraph(record),
+      });
     } catch (err) {
       return next(err);
     }
