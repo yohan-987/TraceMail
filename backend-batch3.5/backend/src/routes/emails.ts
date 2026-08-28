@@ -17,6 +17,7 @@ import { analyzeInfrastructure } from "../analyzers/infrastructure";
 import { buildInfrastructureGraph } from "../analyzers/infrastructureGraph";
 import { correlateEmail } from "../analyzers/correlation";
 import { generateRecommendations } from "../analyzers/recommendations";
+import { buildForensicReport } from "../analyzers/reportBuilder";
 import { geoIpProviderFromEnv } from "../services/geoipClient";
 import { dnsProviderFromEnv } from "../services/dnsClient";
 import { llmProviderFromEnv } from "../services/llmClient";
@@ -255,15 +256,20 @@ emailsRouter.get(
   }
 );
 
-// GET /api/v1/emails/:emailId/report — placeholder until Batch 6.
+// GET /api/v1/emails/:emailId/report — Batch 6: print-friendly, structured
+// forensic report. Built entirely from the stored EmailRecord (plus a
+// fresh, cheap Batch 5B correlation check) — never re-runs parsers, ML,
+// LLM, GeoIP, or DNS. No PDF is generated server-side; the frontend uses
+// the browser's Print → Save as PDF against this structured content.
 emailsRouter.get(
   "/emails/:emailId/report",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const record = await getEmailRecord(req.params.emailId);
       if (!record) throw Errors.emailNotFound(req.params.emailId);
-      if (!record.report) throw Errors.reportNotAvailable(req.params.emailId);
-      return res.status(200).json(record.report);
+      const allRecords = await listAllEmailRecords();
+      const relatedEmails = correlateEmail(record, allRecords);
+      return res.status(200).json(buildForensicReport(record, relatedEmails));
     } catch (err) {
       return next(err);
     }

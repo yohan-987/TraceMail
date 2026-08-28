@@ -158,12 +158,12 @@ test("GET /emails lists scanned emails as lightweight summaries", async () => {
   assert.ok(!("body" in row));
 });
 
-test("GET /emails/:emailId/report is 404 before a report has been generated", async () => {
+test("GET /emails/:emailId/report returns a structured report now that Batch 6 has run", async () => {
   const scanRes = await request(app)
     .post("/api/v1/emails/scan")
     .attach("file", sampleEml(), "no-report-yet.eml");
 
   const res = await request(app).get(`/api/v1/emails/${scanRes.body.emailId}/report`);
-  assert.equal(res.status, 404);
-  assert.equal(res.body.error.code, "REPORT_NOT_AVAILABLE");
+  assert.equal(res.status, 200);
+  assert.equal(res.body.emailId, scanRes.body.emailId);
 });

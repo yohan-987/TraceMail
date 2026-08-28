@@ -354,10 +354,14 @@ describe("Batch 5 email-centric API", { concurrency: false }, () => {
     assert.ok(!blob.toLowerCase().includes("stack"));
   });
 
-  it("GET /emails/:emailId/report is unchanged when Batch 6 has not run", async () => {
+  it("GET /emails/:emailId/report returns a structured report now that Batch 6 has run", async () => {
     const scan = await request(app).post("/api/v1/emails/scan").attach("file", eml({}), "report.eml");
     const res = await request(app).get(`/api/v1/emails/${scan.body.emailId}/report`);
-    assert.equal(res.status, 404);
-    assert.equal(res.body.error.code, "REPORT_NOT_AVAILABLE");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.emailId, scan.body.emailId);
+    assert.ok(res.body.caseInformation);
+    assert.ok(res.body.evidenceIntegrity);
+    assert.ok(Array.isArray(res.body.limitations));
+    assert.ok(res.body.limitations.length >= 2);
   });
 });
