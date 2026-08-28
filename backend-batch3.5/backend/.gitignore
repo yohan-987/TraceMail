@@ -3,3 +3,4 @@ dist/
 .env
 data/emails/*.json
 !data/emails/.gitkeep
+data/emails/
