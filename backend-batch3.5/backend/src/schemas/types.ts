@@ -424,6 +424,44 @@ export interface EmailListQuery {
   sort: EmailListSort;
 }
 
+// --- Related-email / campaign correlation (Batch 5B) -------------------
+// Derived on demand from stored EmailRecords — same "no second dataset"
+// rule as the Batch 5A infrastructure graph. Never implies confirmed
+// threat-actor attribution; campaignId is a deterministic prototype
+// grouping label only.
+export type CorrelationSignalType =
+  | "SHARED_DOMAIN"
+  | "SHARED_URL"
+  | "SHARED_IP"
+  | "SHARED_ATTACHMENT_HASH"
+  | "SHARED_INFRASTRUCTURE"
+  | "SENDER_DOMAIN_SIMILARITY"
+  | "SUBJECT_SIMILARITY";
+
+export interface CorrelationSignal {
+  type: CorrelationSignalType;
+  /** The shared indicator value, or a short description for similarity signals. */
+  values: string[];
+  /** This signal type's fixed contribution toward confidence — see correlation.ts. */
+  weight: number;
+}
+
+export interface RelatedEmailMatch {
+  emailId: string;
+  confidence: number; // bounded 0-1
+  signals: CorrelationSignal[];
+}
+
+export interface RelatedEmailsResponse {
+  emailId: string;
+  campaignId: string | null;
+  confidence: number; // bounded 0-1; strongest related match, 0 if none
+  relatedEmailIds: string[];
+  sharedIndicators: string[];
+  sharedInfrastructure: string[];
+  reasons: string[];
+}
+
 export interface ScanAcceptedResponse {
   emailId: string;
   caseId: string | null;

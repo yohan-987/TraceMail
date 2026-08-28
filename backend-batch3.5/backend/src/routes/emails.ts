@@ -15,6 +15,7 @@ import { assessMl, getDefaultPredictor, mlInputFromEmail } from "../analyzers/ml
 import { assessAi } from "../analyzers/aiAssessment";
 import { analyzeInfrastructure } from "../analyzers/infrastructure";
 import { buildInfrastructureGraph } from "../analyzers/infrastructureGraph";
+import { correlateEmail } from "../analyzers/correlation";
 import { geoIpProviderFromEnv } from "../services/geoipClient";
 import { dnsProviderFromEnv } from "../services/dnsClient";
 import { llmProviderFromEnv } from "../services/llmClient";
@@ -23,6 +24,7 @@ import {
   saveEmailRecord,
   getEmailRecord,
   listEmailSummaries,
+  listAllEmailRecords,
   toPublicEmailRecord,
 } from "../services/emailStore";
 import { applyEmailListQuery, parseEmailListQuery } from "../services/emailQuery";
@@ -217,6 +219,25 @@ emailsRouter.get(
         emailId: record.emailId,
         graph: buildInfrastructureGraph(record),
       });
+    } catch (err) {
+      return next(err);
+    }
+  }
+);
+
+// GET /api/v1/emails/:emailId/related — Batch 5B: evidence-based related-
+// email / campaign correlation for one stored email. Reuses stored
+// analysis only (candidate generation via inverted indexes, then scoring
+// just the candidates) — never re-runs parsers, ML, LLM, GeoIP, or DNS,
+// and never a full O(n²) pairwise comparison.
+emailsRouter.get(
+  "/emails/:emailId/related",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const record = await getEmailRecord(req.params.emailId);
+      if (!record) throw Errors.emailNotFound(req.params.emailId);
+      const allRecords = await listAllEmailRecords();
+      return res.status(200).json(correlateEmail(record, allRecords));
     } catch (err) {
       return next(err);
     }

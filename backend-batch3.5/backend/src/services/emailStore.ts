@@ -153,6 +153,24 @@ export async function listEmailSummaries(): Promise<EmailSummary[]> {
   return summaries;
 }
 
+// Full stored records for every email — used by Batch 5B correlation to
+// build an in-memory indicator index. This is an O(n) directory read,
+// not a second dataset: it just replays getEmailRecord() across every
+// stored emailId. Callers must not use this in a loop per-candidate;
+// build one index per request and reuse it (see analyzers/correlation.ts).
+export async function listAllEmailRecords(): Promise<EmailRecord[]> {
+  await fs.mkdir(dataDir(), { recursive: true });
+  const entries = await fs.readdir(dataDir(), { withFileTypes: true });
+  const emailDirs = entries.filter((e) => e.isDirectory());
+
+  const records: EmailRecord[] = [];
+  for (const dirEntry of emailDirs) {
+    const record = await getEmailRecord(dirEntry.name);
+    if (record) records.push(record);
+  }
+  return records;
+}
+
 /** Strip filesystem paths before sending a stored record to the client. */
 export function toPublicEmailRecord(record: EmailRecord): Record<string, unknown> {
   const { storagePath: _storagePath, ...evidence } = record.evidence;
