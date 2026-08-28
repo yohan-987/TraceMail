@@ -16,6 +16,7 @@ import { assessAi } from "../analyzers/aiAssessment";
 import { analyzeInfrastructure } from "../analyzers/infrastructure";
 import { buildInfrastructureGraph } from "../analyzers/infrastructureGraph";
 import { correlateEmail } from "../analyzers/correlation";
+import { generateRecommendations } from "../analyzers/recommendations";
 import { geoIpProviderFromEnv } from "../services/geoipClient";
 import { dnsProviderFromEnv } from "../services/dnsClient";
 import { llmProviderFromEnv } from "../services/llmClient";
@@ -193,13 +194,23 @@ emailsRouter.get("/emails", async (req: Request, res: Response, next: NextFuncti
 
 // GET /api/v1/emails/:emailId — stored full investigation for one email.
 // Does not re-run expensive analyzers; returns persisted Batch 1–4 data.
+// Batch 5C: also attaches advisory `recommendations`, derived from the
+// stored risk/domain/infrastructure results plus a fresh (cheap, O(n))
+// Batch 5B correlation check — never executed actions, never re-runs
+// ML/LLM/GeoIP/DNS.
 emailsRouter.get(
   "/emails/:emailId",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const record = await getEmailRecord(req.params.emailId);
       if (!record) throw Errors.emailNotFound(req.params.emailId);
-      return res.status(200).json(toPublicEmailRecord(record));
+      const allRecords = await listAllEmailRecords();
+      const relatedEmails = correlateEmail(record, allRecords);
+      const recommendations = generateRecommendations(record, relatedEmails);
+      return res.status(200).json({
+        ...toPublicEmailRecord(record),
+        recommendations,
+      });
     } catch (err) {
       return next(err);
     }

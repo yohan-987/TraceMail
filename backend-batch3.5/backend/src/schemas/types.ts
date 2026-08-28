@@ -462,6 +462,29 @@ export interface RelatedEmailsResponse {
   reasons: string[];
 }
 
+// --- Recommended investigator actions (Batch 5C) ------------------------
+// Derived on demand from stored risk/domain/infrastructure/correlation
+// results — advisory only. The backend never executes quarantine, block,
+// contact, or firewall actions; these are suggestions for a human
+// investigator, each required to cite the stored evidence it rests on.
+export type RecommendedActionType =
+  | "QUARANTINE_EMAIL"
+  | "REVIEW_BLOCK_DOMAIN"
+  | "WARN_RECIPIENT"
+  | "REVIEW_RELATED_EMAILS"
+  | "INVESTIGATE_SOURCE_INFRASTRUCTURE"
+  | "COLLECT_ADDITIONAL_EVIDENCE";
+
+export type RecommendationPriority = "low" | "medium" | "high" | "critical";
+
+export interface Recommendation {
+  action: RecommendedActionType;
+  priority: RecommendationPriority;
+  reason: string;
+  /** Short, human-readable references to the specific stored evidence this rests on — never invented. */
+  supportingEvidence: string[];
+}
+
 export interface ScanAcceptedResponse {
   emailId: string;
   caseId: string | null;
