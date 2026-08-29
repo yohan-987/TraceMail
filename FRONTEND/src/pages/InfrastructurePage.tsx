@@ -125,7 +125,7 @@ function mapDetailedApiToInfrastructure(apiData: any) {
 
 export function InfrastructurePage() {
   const location = useLocation();
-  const { setLastViewed, availableEmails } = useActiveCase();
+  const { setLastViewed, availableEmails, getEmail } = useActiveCase();
   
   const [infrastructureSelectedEmailId, setInfrastructureSelectedEmailId] = useState<string | null>(
     (location.state as { emailId?: string } | null)?.emailId ?? null
@@ -182,11 +182,10 @@ export function InfrastructurePage() {
   const candidateGeo = geoData.filter((g) => !(g.lat === 0 && g.lon === 0));
   const unresolvedGeo = geoData.filter((g) => g.lat === 0 && g.lon === 0);
 
-  const headerEmailContext = activeEmailData ? {
-    id: activeEmailData.emailId,
-    subject: activeEmailData.parsedEmail?.subject || 'No Subject',
-    caseId: activeEmailData.caseId
-  } : null;
+  // Use the real, already-fetched lightweight record from availableEmails —
+  // never a fabricated stub — so InvestigationShell/CaseSelector always
+  // receive a complete ScannedEmail (or null, which they render safely).
+  const headerEmailContext = activeEmailData ? getEmail(activeEmailData.emailId) : null;
 
   return (
     <InvestigationShell
@@ -194,7 +193,7 @@ export function InfrastructurePage() {
       title="Infrastructure Analysis"
       subtitle={activeEmailData ? `Relationships, geolocation, and probable infrastructure · ${activeEmailData.emailId}` : undefined}
       hideCaseSelector={!activeEmailData}
-      selectedEmail={headerEmailContext as any}
+      selectedEmail={headerEmailContext}
       availableEmails={availableEmails}
       onSelectEmail={(id) => { setInfrastructureSelectedEmailId(id); setLastViewed(id); }}
       onClearEmail={() => setInfrastructureSelectedEmailId(null)}

@@ -248,6 +248,7 @@ const stats = useMemo(() => ({
                       onSelect={() => handleSelect(email)}
                       onInspect={() => handleInspect(email)}
                       onReport={() => handleReport(email)}
+                      onDoubleClick={() => handleInspect(email)}
                     />
                   ))}
                 </tbody>
@@ -309,12 +310,14 @@ function EmailRow({
   onSelect,
   onInspect,
   onReport,
+  onDoubleClick,
 }: {
   email: ScannedEmail;
   isSelected: boolean;
   onSelect: () => void;
   onInspect: () => void;
   onReport: () => void;
+  onDoubleClick?: () => void;
 }) {
   const config = statusConfig[email.status];
   const scoreColor =
@@ -333,6 +336,7 @@ function EmailRow({
   return (
     <tr
       onClick={onSelect}
+      onDoubleClick={onDoubleClick}
       className={cn(
         'border-b border-base-500/10 hover:bg-base-700/30 transition-colors cursor-pointer group',
         isSelected && 'bg-base-700/40',

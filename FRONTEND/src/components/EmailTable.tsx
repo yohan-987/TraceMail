@@ -11,7 +11,7 @@ import {
   FolderKanban,
 } from 'lucide-react';
 import { SectionLabel, Badge } from '@/components/ui/Primitives';
-import { mockEmails, type ScannedEmail, type EmailStatus } from '@/data/mockData';
+import { type ScannedEmail, type EmailStatus } from '@/data/mockData';
 import { useActiveCase } from '@/context/ActiveCaseContext';
 import { cn } from '@/lib/utils';
 
@@ -44,7 +44,7 @@ interface EmailTableProps {
 }
 
 export function EmailTable({ selectedId, onSelect, onInvestigate, enableCaseFilter }: EmailTableProps) {
-  const { lastViewedEmailId, lastViewedEmail } = useActiveCase();
+  const { lastViewedEmailId, lastViewedEmail, availableEmails } = useActiveCase();
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [caseFilter, setCaseFilter] = useState<CaseFilter>('all');
@@ -54,12 +54,12 @@ export function EmailTable({ selectedId, onSelect, onInvestigate, enableCaseFilt
   const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const uniqueCaseIds = useMemo(
-    () => Array.from(new Set(mockEmails.filter((e) => e.caseId).map((e) => e.caseId))).sort(),
-    []
+    () => Array.from(new Set(availableEmails.filter((e) => e.caseId).map((e) => e.caseId))).sort(),
+    [availableEmails]
   );
 
   const filtered = useMemo(() => {
-    let result = mockEmails.filter((email) => {
+    let result = availableEmails.filter((email) => {
       const matchesStatus =
         statusFilter === 'all' ||
         (statusFilter === 'clean' && email.status === 'safe') ||
@@ -93,7 +93,7 @@ export function EmailTable({ selectedId, onSelect, onInvestigate, enableCaseFilt
     });
 
     return result;
-  }, [query, statusFilter, caseFilter, enableCaseFilter, sortKey]);
+  }, [availableEmails, query, statusFilter, caseFilter, enableCaseFilter, sortKey]);
 
   const totalPages = Math.ceil(filtered.length / pageSize);
   const currentPage = Math.min(page, Math.max(0, totalPages - 1));

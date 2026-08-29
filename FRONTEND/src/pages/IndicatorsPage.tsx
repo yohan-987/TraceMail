@@ -180,7 +180,7 @@ function getIocDetailFields(ioc: ThreatIndicator, emailData: any): DetailField[]
 
 export function IndicatorsPage() {
   const location = useLocation();
-  const { setLastViewed, availableEmails } = useActiveCase();
+  const { setLastViewed, availableEmails, getEmail } = useActiveCase();
   
   const [indicatorsSelectedEmailId, setIndicatorsSelectedEmailId] = useState<string | null>(
     (location.state as { emailId?: string } | null)?.emailId ?? null
@@ -266,11 +266,10 @@ export function IndicatorsPage() {
 
   const uniqueTypes = new Set(liveIndicators.map((i) => i.type)).size;
   
-  const headerEmailContext = activeEmailData ? {
-    id: activeEmailData.emailId,
-    subject: activeEmailData.parsedEmail?.subject || 'No Subject',
-    caseId: activeEmailData.caseId
-  } : null;
+  // Use the real, already-fetched lightweight record from availableEmails —
+  // never a fabricated stub — so InvestigationShell/CaseSelector always
+  // receive a complete ScannedEmail (or null, which they render safely).
+  const headerEmailContext = activeEmailData ? getEmail(activeEmailData.emailId) : null;
 
   return (
     <InvestigationShell
@@ -278,7 +277,7 @@ export function IndicatorsPage() {
       title="Indicators of Compromise"
       subtitle={activeEmailData ? `${stats.total} indicators across ${uniqueTypes} types · ${activeEmailData.emailId}` : undefined}
       hideCaseSelector={!activeEmailData}
-      selectedEmail={headerEmailContext as any}
+      selectedEmail={headerEmailContext}
       availableEmails={availableEmails}
       onSelectEmail={(id) => { setIndicatorsSelectedEmailId(id); setLastViewed(id); setDrawerIoc(null); }}
       onClearEmail={() => { setIndicatorsSelectedEmailId(null); setDrawerIoc(null); }}

@@ -97,7 +97,7 @@ function formatRiskScore(value: unknown): string {
 
 export function AIInvestigationPage() {
   const location = useLocation();
-  const { setLastViewed, availableEmails } = useActiveCase();
+  const { setLastViewed, availableEmails, getEmail } = useActiveCase();
 
   const [aiSelectedEmailId, setAiSelectedEmailId] =
     useState<string | null>(
@@ -161,15 +161,12 @@ export function AIInvestigationPage() {
     setLastViewed(emailId);
   };
 
-  const headerEmailContext = activeEmailData
-    ? {
-        id: activeEmailData.emailId,
-        subject:
-          activeEmailData.parsedEmail?.subject ||
-          'No Subject',
-        caseId: activeEmailData.caseId,
-      }
-    : null;
+  // Use the real, already-fetched lightweight record from availableEmails —
+  // never a fabricated stub — so InvestigationShell/CaseSelector always
+  // receive a complete ScannedEmail (or null, which they render safely).
+const headerEmailContext = activeEmailData
+    ? getEmail(activeEmailData.emailId)
+    : null;
 
   return (
     <InvestigationShell
@@ -195,7 +192,7 @@ export function AIInvestigationPage() {
         ) : undefined
       }
       hideCaseSelector={!activeEmailData}
-      selectedEmail={headerEmailContext as any}
+      selectedEmail={headerEmailContext}
       availableEmails={availableEmails}
       onSelectEmail={handleSelectEmail}
       onClearEmail={() => setAiSelectedEmailId(null)}

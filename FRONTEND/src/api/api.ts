@@ -62,6 +62,17 @@ export async function getEmails(
 }
 
 export async function getEmail(emailId: string) {
+  // Defensive shared-layer guard: never let a malformed caller (undefined,
+  // null, empty string, or an accidentally-stringified object) reach the
+  // network as `/api/v1/emails/undefined` or similar. Fail fast and
+  // explicitly instead, so callers' existing .catch() handlers surface a
+  // clear error rather than a confusing 404.
+  if (typeof emailId !== "string" || emailId.trim() === "") {
+    throw new Error(
+      `getEmail requires a non-empty emailId string, received: ${JSON.stringify(emailId)}`
+    );
+  }
+
   const response = await fetch(
     `/api/v1/emails/${encodeURIComponent(emailId)}`
   );

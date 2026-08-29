@@ -118,9 +118,14 @@ export function EmailPreview({
   onReport?: () => void;
 }) {
   const Icon = statusIcon[email.status];
-  const ips = email.indicators.filter((i) => i.type === 'IP').length;
-  const domains = email.indicators.filter((i) => i.type === 'Domain').length;
-  const urls = email.indicators.filter((i) => i.type === 'URL').length;
+  // Defensive: a lightweight/partial record (e.g. from an API list response
+  // or a page still loading full details) may not carry these deep arrays —
+  // never assume they're present.
+  const indicators = email.indicators ?? [];
+  const whyFlagged = email.whyFlagged ?? [];
+  const ips = indicators.filter((i) => i.type === 'IP').length;
+  const domains = indicators.filter((i) => i.type === 'Domain').length;
+  const urls = indicators.filter((i) => i.type === 'URL').length;
   const isThreat = email.threatScore >= 60;
 
   return (
@@ -166,14 +171,14 @@ export function EmailPreview({
         <IocChip icon={Paperclip} label="Attachments" count={0} />
       </div>
 
-      {email.whyFlagged.length > 0 && (
+      {whyFlagged.length > 0 && (
         <>
           <div className="flex items-center gap-2 mb-2.5">
             <Flag className="w-3 h-3 text-accent-500" />
             <SectionLabel>Why Flagged</SectionLabel>
           </div>
           <ul className="space-y-2 mb-5">
-            {email.whyFlagged.slice(0, 5).map((reason, i) => (
+            {whyFlagged.slice(0, 5).map((reason, i) => (
               <li key={i} className="flex items-start gap-2 text-[11px] text-ink-400 leading-relaxed">
                 <span className="mono text-[9px] text-accent-600 mt-0.5 shrink-0">
                   {String(i + 1).padStart(2, '0')}
