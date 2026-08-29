@@ -118,6 +118,36 @@ test("createGeminiProvider throws when the response has no usable text", async (
   await assert.rejects(() => provider.complete({ system: "s", user: "u" }));
 });
 
+test("createGeminiProvider requests JSON response mode via generationConfig.responseMimeType", async () => {
+  let capturedBody: any = null;
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    capturedBody = JSON.parse(init.body as string);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: "{}" }] } }] }),
+    } as Response;
+  }) as typeof fetch;
+
+  const provider = createGeminiProvider({ apiKey: "k", model: "gemini-2.5-flash", fetchImpl });
+  await provider.complete({ system: "s", user: "u" });
+
+  assert.equal(capturedBody.generationConfig?.responseMimeType, "application/json");
+});
+
+test("createGeminiProvider surfaces Gemini's own error message on a non-2xx response (safe — no secrets/content)", async () => {
+  const fetchImpl = fakeFetch(403, { error: { message: "API key not valid. Please pass a valid API key.", status: "PERMISSION_DENIED" } });
+  const provider = createGeminiProvider({ apiKey: "k", model: "gemini-2.5-flash", fetchImpl });
+  await assert.rejects(
+    () => provider.complete({ system: "s", user: "u" }),
+    (err: Error) => {
+      assert.ok(err.message.includes("403"));
+      assert.ok(err.message.includes("API key not valid"));
+      return true;
+    }
+  );
+});
+
 test("createGeminiProvider respects an overridden apiBaseUrl without hardcoding it", async () => {
   let capturedUrl = "";
   const fetchImpl = (async (url: string) => {

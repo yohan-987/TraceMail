@@ -99,7 +99,17 @@ export async function assessAi(options: {
       system: SYSTEM_PROMPT,
       user: buildLlmUserPayload(options),
     });
+
+    // TEMPORARY SAFE DIAGNOSTIC — length and a structural shape check
+    // only, never the actual response text (the model's summary can
+    // echo fragments of the email, so treat it the same as email
+    // content for logging purposes).
+    console.error(
+      `[ai-debug] LLM raw response length: ${raw.length} | starts with '{': ${raw.trim().startsWith("{")}`
+    );
+
     const parsed = parseLlmSemanticJson(raw);
+    console.error("[ai-debug] JSON parse + schema validation: OK");
     const score = aiContentScore(parsed);
     const aiAssessment: AIAssessment = {
       emailId,
@@ -136,15 +146,30 @@ export async function assessAi(options: {
 
     return { aiAssessment, evidence };
   } catch (err) {
+    // TEMPORARY SAFE DIAGNOSTIC — error type/name and a bounded,
+    // content-free message only. Zod issue messages describe schema
+    // shape problems (e.g. "phishingIntent: Expected number, received
+    // string"), never email content, so a truncated summary is safe.
     if (err instanceof TimeoutError) {
+      console.error("[ai-debug] assessAi failed at: provider.complete() — request timed out");
       return { aiAssessment: unavailableAi(emailId, "ERROR"), evidence: [] };
     }
     if (err instanceof LlmUnavailableError) {
+      console.error(`[ai-debug] assessAi failed at: provider.complete() — ${err.message}`);
       return { aiAssessment: unavailableAi(emailId, "UNAVAILABLE"), evidence: [] };
     }
-    if (err instanceof SyntaxError || err instanceof ZodError) {
+    if (err instanceof SyntaxError) {
+      console.error(`[ai-debug] assessAi failed at: JSON.parse() — ${err.message}`);
       return { aiAssessment: unavailableAi(emailId, "UNAVAILABLE"), evidence: [] };
     }
+    if (err instanceof ZodError) {
+      const issues = err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ").slice(0, 300);
+      console.error(`[ai-debug] assessAi failed at: schema validation — ${issues}`);
+      return { aiAssessment: unavailableAi(emailId, "UNAVAILABLE"), evidence: [] };
+    }
+    console.error(
+      `[ai-debug] assessAi failed at: unexpected error — ${err instanceof Error ? err.constructor.name + ": " + err.message : String(err)}`
+    );
     return { aiAssessment: unavailableAi(emailId, "UNAVAILABLE"), evidence: [] };
   }
 }
