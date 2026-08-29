@@ -23,10 +23,25 @@ export function resetMlModelCache(): void {
   cachedModel = undefined;
 }
 
+// Treats a value that is unset OR blank/whitespace-only as "not provided".
+// This matters specifically for env vars: `ML_MODEL_PATH=` (present but
+// empty — exactly what .env.example ships, and what a .env copied from
+// it will contain) sets process.env.ML_MODEL_PATH to "", and "" is NOT
+// null/undefined, so `??` alone does not fall through to the bundled
+// model path. Root cause of getDefaultPredictor() silently returning
+// null: an empty-but-set ML_MODEL_PATH resolved to fs.readFile(""),
+// which fails and was (correctly) swallowed by the catch below, masking
+// the real problem as "no model available".
+function firstNonBlank(...values: (string | undefined | null)[]): string | undefined {
+  for (const value of values) {
+    if (value != null && value.trim() !== "") return value;
+  }
+  return undefined;
+}
+
 export async function loadSerializedModel(modelPath?: string): Promise<SerializedMlModel | null> {
   const resolved =
-    modelPath ??
-    process.env.ML_MODEL_PATH ??
+    firstNonBlank(modelPath, process.env.ML_MODEL_PATH) ??
     path.join(__dirname, "..", "..", "models", "tfidf-logistic-v1.json");
   try {
     const raw = await fs.readFile(resolved, "utf-8");

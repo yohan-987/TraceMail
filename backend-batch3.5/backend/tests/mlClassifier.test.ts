@@ -5,7 +5,7 @@ import os from "os";
 import { promises as fs } from "fs";
 import { LABELED_EMAILS } from "../src/ml/dataset";
 import { predictPhishingProbability, stratifiedSplit, trainSerializedModel } from "../src/ml/model";
-import { assessMl, loadSerializedModel, mlInputFromEmail } from "../src/analyzers/mlClassifier";
+import { assessMl, getDefaultPredictor, loadSerializedModel, mlInputFromEmail, resetMlModelCache } from "../src/analyzers/mlClassifier";
 import type { ParsedEmail } from "../src/schemas/types";
 
 function parsed(subject: string, body: string): ParsedEmail {
@@ -121,4 +121,93 @@ test("loadSerializedModel reads a saved model", async () => {
   const loaded = await loadSerializedModel(file);
   assert.ok(loaded);
   assert.equal(loaded.model, "tfidf-logistic-v1");
+});
+
+test("a blank explicit modelPath argument falls back to the bundled default model, not an empty path", async () => {
+  // Root-cause regression test: `loadSerializedModel("")` used to try
+  // fs.readFile("") (always fails) instead of falling back to the
+  // bundled models/tfidf-logistic-v1.json.
+  const loaded = await loadSerializedModel("");
+  assert.ok(loaded, "blank modelPath must fall back to the bundled model, not resolve to an empty path");
+  assert.equal(loaded!.model, "tfidf-logistic-v1");
+});
+
+test("a blank ML_MODEL_PATH env var falls back to the bundled default model, not an empty path", async () => {
+  // Root-cause regression test for the actual reported bug: .env.example
+  // ships `ML_MODEL_PATH=` (present but blank). dotenv sets
+  // process.env.ML_MODEL_PATH to "" in that case — "" is not
+  // null/undefined, so a bare `??` chain does NOT fall through to the
+  // bundled model path, silently breaking local ML in any environment
+  // that copied .env.example verbatim.
+  const previous = process.env.ML_MODEL_PATH;
+  process.env.ML_MODEL_PATH = "";
+  try {
+    const loaded = await loadSerializedModel();
+    assert.ok(loaded, "blank ML_MODEL_PATH must fall back to the bundled model, not resolve to an empty path");
+    assert.equal(loaded!.model, "tfidf-logistic-v1");
+  } finally {
+    if (previous === undefined) delete process.env.ML_MODEL_PATH;
+    else process.env.ML_MODEL_PATH = previous;
+  }
+});
+
+test("a whitespace-only ML_MODEL_PATH env var also falls back to the bundled default model", async () => {
+  const previous = process.env.ML_MODEL_PATH;
+  process.env.ML_MODEL_PATH = "   ";
+  try {
+    const loaded = await loadSerializedModel();
+    assert.ok(loaded);
+    assert.equal(loaded!.model, "tfidf-logistic-v1");
+  } finally {
+    if (previous === undefined) delete process.env.ML_MODEL_PATH;
+    else process.env.ML_MODEL_PATH = previous;
+  }
+});
+
+test("an explicit non-blank modelPath still takes priority over ML_MODEL_PATH", async () => {
+  const { model } = trainSerializedModel(LABELED_EMAILS);
+  const file = path.join(os.tmpdir(), `ml-priority-test-${Date.now()}.json`);
+  await fs.writeFile(file, JSON.stringify(model), "utf-8");
+
+  const previous = process.env.ML_MODEL_PATH;
+  process.env.ML_MODEL_PATH = path.join(os.tmpdir(), "should-not-be-used.json");
+  try {
+    const loaded = await loadSerializedModel(file);
+    assert.ok(loaded);
+  } finally {
+    if (previous === undefined) delete process.env.ML_MODEL_PATH;
+    else process.env.ML_MODEL_PATH = previous;
+  }
+});
+
+test("end-to-end: getDefaultPredictor + assessMl produce a genuine AVAILABLE result from the bundled model when ML_MODEL_PATH is blank", async () => {
+  const previous = process.env.ML_MODEL_PATH;
+  process.env.ML_MODEL_PATH = "";
+  resetMlModelCache();
+  try {
+    const predictor = await getDefaultPredictor();
+    assert.ok(predictor, "getDefaultPredictor() must not be null when a real bundled model is present");
+
+    const { mlAssessment, evidence } = assessMl({
+      emailId: "EMAIL-BLANK-ENV",
+      input: mlInputFromEmail(parsed("Urgent: verify your account immediately", "Click here to verify your account and enter your password."), 1, {
+        urgency: 2,
+        credential_request: 1,
+        financial_request: 0,
+        call_to_action: 1,
+      }),
+      predictor,
+    });
+
+    assert.equal(mlAssessment.status, "AVAILABLE");
+    assert.equal(mlAssessment.model, "tfidf-logistic-v1");
+    assert.ok(typeof mlAssessment.probability === "number" && Number.isFinite(mlAssessment.probability));
+    assert.ok(mlAssessment.probability! >= 0 && mlAssessment.probability! <= 1);
+    assert.ok(mlAssessment.classification === "phishing" || mlAssessment.classification === "legitimate");
+    assert.ok(Array.isArray(evidence));
+  } finally {
+    if (previous === undefined) delete process.env.ML_MODEL_PATH;
+    else process.env.ML_MODEL_PATH = previous;
+    resetMlModelCache();
+  }
 });
