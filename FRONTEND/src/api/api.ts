@@ -13,6 +13,53 @@ export interface ApiEmailSummary {
   analysisStatus?: string;
 }
 
+// The shape returned by GET /api/v1/emails/:emailId — the full stored
+// EmailRecord (Batch 1-4) plus `email`/`headers`/`urlDomainAnalysis`
+// aliases and Batch 5C's `recommendations` (see backend
+// toPublicEmailRecord + the GET /:emailId route handler). This is
+// deliberately NOT the same flat shape as ApiEmailSummary (the list
+// endpoint) — nested under `risk`/`mlAssessment`/`aiAssessment` instead
+// of flattened to top-level fields. emailMapper.ts reads from whichever
+// of the two shapes it's actually given.
+export interface ApiRecommendation {
+  action: string;
+  priority: string;
+  reason: string;
+  supportingEvidence: string[];
+}
+
+export interface ApiEmailDetail {
+  emailId: string;
+  caseId: string | null;
+  email?: {
+    subject?: string | null;
+    from?: Array<{ email?: string | null; displayName?: string | null }>;
+    to?: Array<{ email?: string | null }>;
+    date?: string | null;
+  } | null;
+  authentication?: {
+    spf?: { result?: string } | null;
+    dkim?: { result?: string } | null;
+    dmarc?: { result?: string } | null;
+  } | null;
+  risk?: {
+    score?: number | null;
+    level?: string | null;
+    classification?: string | null;
+  } | null;
+  mlAssessment?: {
+    probability?: number | null;
+    status?: string;
+  } | null;
+  aiAssessment?: {
+    summary?: string | null;
+    attackType?: string | null;
+    status?: string;
+  } | null;
+  explanations?: Array<{ message: string }>;
+  recommendations?: ApiRecommendation[];
+}
+
 export interface ApiEmailListResponse {
   items: ApiEmailSummary[];
   pagination: {

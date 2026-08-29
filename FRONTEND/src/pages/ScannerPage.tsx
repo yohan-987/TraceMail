@@ -9,6 +9,8 @@ import {
   File as FileIcon,
   X,
   CheckCircle2,
+  Sparkles,
+  ListChecks,
 } from 'lucide-react';
 import { ThreatRing } from '@/components/ThreatRing';
 import { Card, SectionLabel, Badge } from '@/components/ui/Primitives';
@@ -238,6 +240,60 @@ export function ScannerPage() {
                           <li key={i} className="flex items-start gap-2 text-[13px] text-ink-300">
                             <span className="mono text-[10px] text-accent-600 mt-0.5">{String(i + 1).padStart(2, '0')}</span>
                             {r}
+                          </li>
+                        ))}
+                      </ul>
+                    </Card>
+                  )}
+
+                  <Card className="p-5">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Sparkles className="w-3.5 h-3.5 text-accent-500" />
+                      <SectionLabel>ML / AI Assessment</SectionLabel>
+                    </div>
+                    <div className="space-y-3 text-sm">
+                      <DataRow
+                        label="ML Probability"
+                        mono
+                        value={
+                          analyzedEmail.mlStatus === 'AVAILABLE' && analyzedEmail.mlProbability != null
+                            ? `${Math.round(analyzedEmail.mlProbability * 100)}%`
+                            : `Unavailable (${analyzedEmail.mlStatus ?? 'not run'})`
+                        }
+                      />
+                      <DataRow
+                        label="Attack Type"
+                        value={analyzedEmail.attackType || 'Unavailable — no AI provider result'}
+                      />
+                      <div>
+                        <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-500 block mb-1">
+                          AI Summary
+                        </span>
+                        <p className="text-[13px] text-ink-300">
+                          {analyzedEmail.aiStatus === 'AVAILABLE' && analyzedEmail.aiSummary
+                            ? analyzedEmail.aiSummary
+                            : 'AI assessment unavailable in this environment (no LLM provider configured). This is a fallback state, not a genuine model result — findings above are from deterministic and ML analysis only.'}
+                        </p>
+                      </div>
+                    </div>
+                  </Card>
+
+                  {analyzedEmail.recommendedActions && analyzedEmail.recommendedActions.length > 0 && (
+                    <Card className="p-5">
+                      <div className="flex items-center gap-2 mb-3">
+                        <ListChecks className="w-3.5 h-3.5 text-accent-500" />
+                        <SectionLabel>Recommended Actions</SectionLabel>
+                      </div>
+                      <ul className="space-y-3">
+                        {analyzedEmail.recommendedActions.map((rec, i) => (
+                          <li key={i} className="text-[13px]">
+                            <div className="flex items-center gap-2 mb-1">
+                              <Badge variant={rec.priority === 'critical' || rec.priority === 'high' ? 'danger' : 'neutral'}>
+                                {rec.priority}
+                              </Badge>
+                              <span className="mono text-[11px] text-ink-200 font-semibold">{rec.action}</span>
+                            </div>
+                            <p className="text-ink-400">{rec.reason}</p>
                           </li>
                         ))}
                       </ul>

@@ -59,6 +59,13 @@ export interface ReceivedHop {
 
 export type EmailStatus = 'safe' | 'suspicious' | 'malicious' | 'inconclusive';
 
+export interface RecommendedAction {
+  action: string;
+  priority: string;
+  reason: string;
+  supportingEvidence: string[];
+}
+
 export interface ScannedEmail {
   id: string;
   caseId: string;
@@ -87,6 +94,16 @@ export interface ScannedEmail {
   infraEdges: InfraEdge[];
   geoData: GeoEntry[];
   reportSections: { title: string; content: string }[];
+  // Optional — only populated when the source API response was the full
+  // per-email detail (GET /api/v1/emails/:emailId), never the lightweight
+  // list summary. Absent (not faked) rather than defaulted, so the UI can
+  // tell "not checked yet" apart from "checked, genuinely unavailable".
+  mlProbability?: number | null;
+  mlStatus?: string;
+  aiSummary?: string | null;
+  aiStatus?: string;
+  attackType?: string | null;
+  recommendedActions?: RecommendedAction[];
 }
 
 const emptyInfraNodes: InfraNode[] = [];
