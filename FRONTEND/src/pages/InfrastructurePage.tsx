@@ -6,7 +6,7 @@ import { useActiveCase } from '@/context/ActiveCaseContext';
 import { InvestigationShell } from '@/components/InvestigationShell';
 import { InvestigationWorkspace, PreviewField, PreviewInvestigateButton } from '@/components/InvestigationWorkspace';
 import { cn } from '@/lib/utils';
-import { getEmail as fetchEmailDetails } from '@/api/api';
+import { getEmail as fetchEmailDetails, getRelatedEmails, type ApiRelatedEmails } from '@/api/api';
 
 // --- TYPES ---
 export interface InfraNode {
@@ -137,11 +137,16 @@ export function InfrastructurePage() {
   });
   const [isLoadingDetails, setIsLoadingDetails] = useState(false);
   const [detailsError, setDetailsError] = useState<string | null>(null);
+  // Batch 5B — real campaign/correlation data, fetched separately from
+  // the detail record so a failure here never blocks the rest of the
+  // infrastructure view.
+  const [relatedEmails, setRelatedEmails] = useState<ApiRelatedEmails | null>(null);
 
   useEffect(() => {
     if (!infrastructureSelectedEmailId) {
       setActiveEmailData(null);
       setMappedInfra({ geoData: [], infraNodes: [], infraEdges: [] });
+      setRelatedEmails(null);
       return;
     }
 
@@ -165,6 +170,14 @@ export function InfrastructurePage() {
         if (!cancelled) {
           setIsLoadingDetails(false);
         }
+      });
+
+    getRelatedEmails(infrastructureSelectedEmailId)
+      .then((data) => {
+        if (!cancelled) setRelatedEmails(data);
+      })
+      .catch(() => {
+        if (!cancelled) setRelatedEmails(null);
       });
 
     return () => {
@@ -283,6 +296,41 @@ export function InfrastructurePage() {
               </div>
             ) : (
               <div className="text-[12px] text-ink-600 text-center py-8">No candidate source IPs identified</div>
+            )}
+          </Card>
+
+          {/* Batch 5B — real correlation data, never fabricated relationships. */}
+          <Card className="mt-5 p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Radar className="w-3.5 h-3.5 text-sky-400" />
+                <SectionLabel>Likely Related Campaign</SectionLabel>
+              </div>
+              {relatedEmails?.campaignId && (
+                <Badge variant="neutral">{Math.round(relatedEmails.confidence * 100)}% confidence</Badge>
+              )}
+            </div>
+            {relatedEmails && relatedEmails.relatedEmailIds.length > 0 ? (
+              <div className="grid grid-cols-4 gap-3">
+                <div className="panel-2 p-3">
+                  <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-1">Campaign ID</div>
+                  <div className="mono text-[12px] text-ink-200">{relatedEmails.campaignId}</div>
+                </div>
+                <div className="panel-2 p-3">
+                  <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-1">Related Emails</div>
+                  <div className="text-[12px] text-ink-200">{relatedEmails.relatedEmailIds.length}</div>
+                </div>
+                <div className="panel-2 p-3">
+                  <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-1">Shared Indicators</div>
+                  <div className="text-[12px] text-ink-200">{relatedEmails.sharedIndicators.length}</div>
+                </div>
+                <div className="panel-2 p-3">
+                  <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-1">Shared Infrastructure</div>
+                  <div className="text-[12px] text-ink-200">{relatedEmails.sharedInfrastructure.length}</div>
+                </div>
+              </div>
+            ) : (
+              <div className="text-[12px] text-ink-600 text-center py-4">No related emails or campaign correlation found</div>
             )}
           </Card>
         </div>

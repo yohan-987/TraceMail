@@ -1,5 +1,6 @@
 import { promises as fs } from "fs";
 import path from "path";
+import { Errors } from "../utils/apiError";
 import type { EmailAddress, EmailRecord, EmailSummary } from "../schemas/types";
 
 // Layout (Batch 1 spec section 5):
@@ -113,7 +114,14 @@ export async function saveEmailRecord(record: EmailRecord): Promise<void> {
 export async function getEmailRecord(emailId: string): Promise<EmailRecord | null> {
   try {
     const raw = await fs.readFile(parsedJsonPath(emailId), "utf-8");
-    return JSON.parse(raw) as EmailRecord;
+    try {
+      return JSON.parse(raw) as EmailRecord;
+    } catch {
+      // Batch 7 hardening: a corrupted/truncated stored record is a
+      // server-side storage problem — surface it as a controlled 500,
+      // never let the raw JSON.parse SyntaxError reach the client.
+      throw Errors.recordUnreadable(emailId);
+    }
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
@@ -123,7 +131,11 @@ export async function getEmailRecord(emailId: string): Promise<EmailRecord | nul
 async function readSummary(emailId: string): Promise<EmailSummary | null> {
   try {
     const raw = await fs.readFile(summaryJsonPath(emailId), "utf-8");
-    return JSON.parse(raw) as EmailSummary;
+    try {
+      return JSON.parse(raw) as EmailSummary;
+    } catch {
+      throw Errors.recordUnreadable(emailId);
+    }
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       const record = await getEmailRecord(emailId);

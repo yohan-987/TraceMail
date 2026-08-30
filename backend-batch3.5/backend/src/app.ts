@@ -9,6 +9,15 @@ import type { ApiErrorBody } from "./schemas/types";
 export function createApp() {
   const app = express();
 
+  // Batch 7 hardening: don't advertise the framework, and apply two
+  // zero-dependency, low-risk safe headers appropriate for a JSON API.
+  app.disable("x-powered-by");
+  app.use((_req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    next();
+  });
+
   // Default cors() reflects the requesting Origin — enough for local Vite
   // (typically :5173) talking to this API (typically :4000). Optional
   // CORS_ORIGINS is a comma-separated allow-list for tighter setups;
@@ -44,11 +53,23 @@ export function createApp() {
       return res.status(err.status).json(body);
     }
     if (err instanceof multer.MulterError) {
+      // Batch 7: the spec's expected status for an oversized upload is
+      // 413 Payload Too Large, not a generic 400 — every other multer
+      // failure (wrong field name, too many files, etc.) stays 400.
+      const status = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
       const body: ApiErrorBody = { error: { code: "UPLOAD_ERROR", message: err.message } };
-      return res.status(400).json(body);
+      return res.status(status).json(body);
     }
     if (err instanceof Error) {
-      const body: ApiErrorBody = { error: { code: "BAD_REQUEST", message: err.message } };
+      // Batch 7 hardening: an unclassified Error reaching here means
+      // some code path threw without going through our own ApiError
+      // convention — its .message could reference internals (a file
+      // path, a raw parser error, etc.), so it's logged server-side
+      // for diagnosis but never echoed to the client verbatim.
+      console.error("Unclassified error:", err);
+      const body: ApiErrorBody = {
+        error: { code: "BAD_REQUEST", message: "The request could not be processed." },
+      };
       return res.status(400).json(body);
     }
     console.error("Unhandled error:", err);

@@ -50,11 +50,24 @@ export interface ReportAuthentication {
   status: "AVAILABLE" | "UNAVAILABLE";
 }
 
+export interface ReportReceivedHop {
+  hop: number;
+  fromHostname: string | null;
+  fromIp: string | null;
+  byHostname: string | null;
+  timestampIso: string | null;
+}
+
 export interface ReportHeaderForensics {
   status: string;
   anomalyCount: number;
   anomalies: { type: string; severity: string; message: string; provenance: string }[];
   receivedHopCount: number;
+  // Batch 7: the "Received Relay Chain" report section needs the actual
+  // per-hop chain, not just a count — reusing the same data the
+  // header-forensics analyzer already computed (OBSERVED provenance),
+  // never re-derived or re-parsed here.
+  receivedChain: ReportReceivedHop[];
 }
 
 export interface ReportThreatAssessment {
@@ -237,8 +250,15 @@ export function buildForensicReport(
             provenance: a.provenance,
           })),
           receivedHopCount: record.headerAnalysis.receivedChain.length,
+          receivedChain: record.headerAnalysis.receivedChain.map((hop) => ({
+            hop: hop.hop,
+            fromHostname: hop.fromHostname,
+            fromIp: hop.fromIp,
+            byHostname: hop.byHostname,
+            timestampIso: hop.timestampIso,
+          })),
         }
-      : { status: "UNAVAILABLE", anomalyCount: 0, anomalies: [], receivedHopCount: 0 },
+      : { status: "UNAVAILABLE", anomalyCount: 0, anomalies: [], receivedHopCount: 0, receivedChain: [] },
 
     threatAssessment: risk
       ? {

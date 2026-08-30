@@ -16,6 +16,6 @@ test("POST /emails/scan rejects a file exceeding the configured max size", async
     .post("/api/v1/emails/scan")
     .attach("file", oversized, "big.eml");
 
-  assert.equal(res.status, 400);
+  assert.equal(res.status, 413);
   assert.equal(res.body.error.code, "UPLOAD_ERROR");
 });

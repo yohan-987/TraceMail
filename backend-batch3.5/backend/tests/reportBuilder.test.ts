@@ -318,6 +318,38 @@ describe("buildForensicReport — missing evidence", () => {
   });
 });
 
+describe("buildForensicReport — received relay chain", () => {
+  it("includes the full per-hop received chain, not just a count", () => {
+    const r = record({
+      headerAnalysis: headerAnalysis({
+        receivedChain: [
+          {
+            hop: 1,
+            fromHostname: "mail.example.com",
+            fromIp: "203.0.113.5",
+            fromIpClassification: "PUBLIC",
+            byHostname: "mx.example.org",
+            timestampRaw: "Fri, 28 Aug 2026 10:00:00 +0000",
+            timestampIso: "2026-08-28T10:00:00.000Z",
+            rawHeader: "Received: from mail.example.com by mx.example.org; Fri, 28 Aug 2026 10:00:00 +0000",
+          },
+        ],
+      }),
+    });
+    const report = buildForensicReport(r, null);
+    assert.equal(report.headerForensics.receivedHopCount, 1);
+    assert.equal(report.headerForensics.receivedChain.length, 1);
+    assert.equal(report.headerForensics.receivedChain[0].fromIp, "203.0.113.5");
+    assert.equal(report.headerForensics.receivedChain[0].fromHostname, "mail.example.com");
+  });
+
+  it("reports an empty received chain (not fabricated) when header analysis is unavailable", () => {
+    const r = record({ headerAnalysis: null });
+    const report = buildForensicReport(r, null);
+    assert.deepEqual(report.headerForensics.receivedChain, []);
+  });
+});
+
 describe("buildForensicReport — data integrity", () => {
   it("why-flagged is exactly the stored explanations list, never re-derived", () => {
     const ev1: RiskEvidenceItem = {

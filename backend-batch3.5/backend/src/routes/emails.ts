@@ -34,6 +34,21 @@ import type { EmailRecord, ScanAcceptedResponse } from "../schemas/types";
 
 export const emailsRouter = Router();
 
+// Batch 7 hardening: validate the :emailId route param once, for every
+// route that declares it, instead of letting each handler pass the raw
+// value straight to storage. safeId() in emailStore.ts already strips
+// anything unsafe before touching the filesystem, so this isn't a
+// traversal fix — it's about failing a malformed ID cleanly with a 400
+// (rather than silently mangling it into an unrelated lookup that
+// 404s) and keeping obviously-invalid raw input out of error messages.
+const EMAIL_ID_PATTERN = /^[A-Za-z0-9-]{1,100}$/;
+emailsRouter.param("emailId", (req: Request, res: Response, next: NextFunction, value: string) => {
+  if (!EMAIL_ID_PATTERN.test(value)) {
+    return next(Errors.invalidEmailId());
+  }
+  return next();
+});
+
 // POST /api/v1/emails/scan
 // Batch 1: validates upload, preserves the original .eml untouched,
 // hashes evidence, parses it, and persists the full EmailRecord.

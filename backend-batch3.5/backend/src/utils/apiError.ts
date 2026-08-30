@@ -33,4 +33,23 @@ export const Errors = {
     ),
   invalidFilter: (message: string) => new ApiError("INVALID_FILTER", message, 400),
   invalidPagination: (message: string) => new ApiError("INVALID_PAGINATION", message, 400),
+  // Batch 7 hardening — a route param that doesn't even look like an
+  // emailId/caseId (wrong characters, empty, unreasonably long) is
+  // rejected outright with a clean 400 instead of being silently
+  // stripped down to a different string by storage-layer sanitization
+  // and then 404ing. Keeps the raw value out of error messages too.
+  invalidEmailId: () =>
+    new ApiError("INVALID_EMAIL_ID", "emailId must be a non-empty alphanumeric/hyphen string.", 400),
+  invalidFileType: () =>
+    new ApiError("INVALID_FILE_TYPE", "Only .eml files are accepted.", 400),
+  // A stored record that fails to parse (corrupted/truncated JSON on
+  // disk) is a server-side storage problem, not something the client
+  // did wrong — never echo the raw parse error (which could reference
+  // internal file structure) to the client.
+  recordUnreadable: (emailId: string) =>
+    new ApiError(
+      "RECORD_UNREADABLE",
+      `The stored record for ${emailId} could not be read. It may be corrupted.`,
+      500
+    ),
 };

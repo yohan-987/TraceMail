@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
   FileText,
@@ -10,40 +10,16 @@ import {
   CheckCircle,
   XCircle,
   AlertTriangle,
+  Loader2,
 } from 'lucide-react';
 import { Card, SectionLabel, Badge, Divider } from '@/components/ui/Primitives';
 import { useActiveCase } from '@/context/ActiveCaseContext';
 import { InvestigationShell } from '@/components/InvestigationShell';
 import { InvestigationWorkspace, PreviewField, PreviewInvestigateButton } from '@/components/InvestigationWorkspace';
 import { ProvenanceTag, provenanceMeta, type Provenance } from '@/components/ProvenanceTag';
-import { mockEmails, type ScannedEmail } from '@/data/mockData';
+import { type ScannedEmail } from '@/data/mockData';
+import { getEmailReport, type ApiForensicReport } from '@/api/api';
 import { cn } from '@/lib/utils';
-
-/** Same cosmetic-only placeholder hash used on the Scanner page — not a real
- *  digest, just a deterministic-looking stand-in until a backend supplies one. */
-function mockSha256(seed: string): string {
-  let h1 = 0x811c9dc5;
-  for (let i = 0; i < seed.length; i++) {
-    h1 ^= seed.charCodeAt(i);
-    h1 = Math.imul(h1, 0x01000193);
-  }
-  let out = '';
-  let x = h1 >>> 0;
-  while (out.length < 64) {
-    x = (Math.imul(x, 48271) + 1) >>> 0;
-    out += x.toString(16).padStart(8, '0');
-  }
-  return out.slice(0, 64);
-}
-
-function getRecommendedAction(email: ScannedEmail): string | null {
-  return email.reportSections.find((s) => s.title === 'RECOMMENDATIONS')?.content ?? null;
-}
-
-function getRelatedEmailCount(email: ScannedEmail): number {
-  if (!email.caseId) return 0;
-  return mockEmails.filter((e) => e.caseId === email.caseId && e.id !== email.id).length;
-}
 
 /**
  * Six-value provenance taxonomy used sparingly — one badge per report
@@ -92,6 +68,38 @@ export function ReportsPage() {
 
   const activeEmail = useMemo(() => getEmail(reportsSelectedEmailId), [getEmail, reportsSelectedEmailId]);
 
+  // The real backend report (Batch 6) — fetched fresh whenever the
+  // selected email changes. This replaces the old client-side
+  // fabrication (mock hash, mock analyst, mock campaign fields) with
+  // the actual GET /api/v1/emails/:emailId/report response.
+  const [report, setReport] = useState<ApiForensicReport | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!reportsSelectedEmailId) {
+      setReport(null);
+      setReportError(null);
+      return;
+    }
+    let cancelled = false;
+    setReportLoading(true);
+    setReportError(null);
+    getEmailReport(reportsSelectedEmailId)
+      .then((data) => {
+        if (!cancelled) setReport(data);
+      })
+      .catch((err) => {
+        if (!cancelled) setReportError(err instanceof Error ? err.message : 'Failed to load report');
+      })
+      .finally(() => {
+        if (!cancelled) setReportLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [reportsSelectedEmailId]);
+
   const handleInvestigate = (email: ScannedEmail) => {
     setReportsSelectedEmailId(email.id);
     setLastViewed(email.id);
@@ -131,24 +139,31 @@ export function ReportsPage() {
     >
       {!activeEmail ? (
         <InvestigationWorkspace onInvestigate={handleInvestigate} renderPreview={renderReportsPreview} enableCaseFilter />
-      ) : (
-        <FullReport email={activeEmail} />
-      )}
+      ) : reportLoading ? (
+        <div className="flex items-center justify-center gap-2 py-20 text-ink-500 text-[12px]">
+          <Loader2 className="w-4 h-4 animate-spin" /> Loading report…
+        </div>
+      ) : reportError ? (
+        <Card className="p-6 text-center">
+          <div className="text-[13px] text-ink-300 mb-1">Failed to load report</div>
+          <div className="text-[11px] text-ink-500">{reportError}</div>
+        </Card>
+      ) : report ? (
+        <FullReport report={report} />
+      ) : null}
     </InvestigationShell>
   );
 }
 
-function FullReport({ email }: { email: ScannedEmail }) {
-  const isThreat = email.threatScore >= 60;
-  const hash = mockSha256(`${email.id}:${email.subject}`);
-  const filename = `${email.id}.eml`;
-  const relatedCount = getRelatedEmailCount(email);
-  const recommendedAction = getRecommendedAction(email);
-  const confidence = Math.min(99, Math.round(email.threatScore * 0.9 + 8));
-  const urlDomainIocs = email.indicators.filter((i) => i.type === 'URL' || i.type === 'Domain');
+function FullReport({ report }: { report: ApiForensicReport }) {
+  const risk = report.threatAssessment;
+  const isThreat = (risk.score ?? 0) >= 60;
+  const ml = report.mlAiAssessment.ml;
+  const ai = report.mlAiAssessment.ai;
+  const campaign = report.relatedCampaign;
 
   return (
-    <div key={email.id} className="space-y-5 animate-fade-in">
+    <div key={report.emailId} className="space-y-5 animate-fade-in">
       {/* Report header — quick-glance identity + evidence integrity summary */}
       <Card className="p-5">
         <div className="flex items-start justify-between mb-4 flex-wrap gap-3">
@@ -158,83 +173,96 @@ function FullReport({ email }: { email: ScannedEmail }) {
             </div>
             <div>
               <div className="text-base font-bold text-ink-50">Forensic Analysis Report</div>
-              <div className="text-[11px] text-ink-500 mt-0.5">{email.subject}</div>
+              <div className="text-[11px] text-ink-500 mt-0.5">{report.emailMetadata.subject ?? 'UNAVAILABLE'}</div>
             </div>
           </div>
           <div className="flex gap-2">
-            <Badge variant={isThreat ? 'critical' : 'neutral'}>{email.riskLevel}</Badge>
-            <Badge variant="danger">{email.classification}</Badge>
+            <Badge variant={isThreat ? 'critical' : 'neutral'}>{risk.level ?? 'UNKNOWN'}</Badge>
+            <Badge variant="danger">{risk.classification ?? 'unclassified'}</Badge>
           </div>
         </div>
         <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
-          <Field label="Email ID" value={email.id} mono />
-          <Field label="Case ID" value={email.caseId || null} mono />
-          <Field label="Original Filename" value={filename} mono />
-          <Field label="SHA-256" value={hash} mono />
-          <Field label="Upload Timestamp" value={email.date} mono />
-          <Field label="Analysis Timestamp" value={null} mono />
+          <Field label="Email ID" value={report.emailId} mono />
+          <Field label="Case ID" value={report.caseInformation.caseId} mono />
+          <Field label="Original Filename" value={report.caseInformation.filename} mono />
+          <Field label="SHA-256" value={report.evidenceIntegrity.sha256} mono />
+          <Field label="Upload Timestamp" value={report.evidenceIntegrity.collectedAt} mono />
+          <Field label="Report Generated" value={report.generatedAt} mono />
         </div>
       </Card>
 
       <ReportSection num={1} title="Case Information" provenance="observed">
-        <div className="grid grid-cols-4 gap-3">
-          <Field label="Case ID" value={email.caseId || null} mono />
-          <Field label="Email ID" value={email.id} mono />
-          <Field label="Assigned Analyst" value="M. Chen" />
-          <Field label="Analysis Status" value="Automated Analysis Complete" />
+        <div className="grid grid-cols-3 gap-3">
+          <Field label="Case ID" value={report.caseInformation.caseId} mono />
+          <Field label="Email ID" value={report.caseInformation.emailId} mono />
+          <Field label="Report Generated" value={report.caseInformation.generatedAt} mono />
         </div>
       </ReportSection>
 
       <ReportSection num={2} title="Evidence Integrity" provenance="observed">
         <div className="grid grid-cols-4 gap-3">
-          <Field label="Original Filename" value={filename} mono />
-          <Field label="SHA-256 Hash" value={hash} mono />
-          <Field label="Upload Timestamp" value={email.date} mono />
-          <Field label="Analysis Timestamp" value={null} mono />
+          <Field label="Original Filename" value={report.caseInformation.filename} mono />
+          <Field label="SHA-256 Hash" value={report.evidenceIntegrity.sha256} mono />
+          <Field label="Upload Timestamp" value={report.evidenceIntegrity.collectedAt} mono />
+          <Field label="File Size" value={`${report.evidenceIntegrity.fileSizeBytes} bytes`} mono />
         </div>
+        <p className="text-[11px] text-ink-500 mt-3">{report.evidenceIntegrity.note}</p>
       </ReportSection>
 
       <ReportSection num={3} title="Email Metadata" provenance="observed">
-        <div className="grid grid-cols-4 gap-3">
-          <Field label="Sender" value={email.sender} mono />
-          <Field label="Recipient" value={email.recipient} mono />
-          <Field label="Subject" value={email.subject} />
-          <Field label="Date" value={email.date} mono />
-          <Field label="Size" value={email.size} mono />
-          <Field label="Message-ID" value={email.headers?.['Message-ID'] || null} mono />
-        </div>
+        {report.emailMetadata.status === 'AVAILABLE' ? (
+          <div className="grid grid-cols-4 gap-3">
+            <Field label="Sender" value={report.emailMetadata.from[0]?.email ?? null} mono />
+            <Field label="Recipient" value={report.emailMetadata.to[0]?.email ?? null} mono />
+            <Field label="Subject" value={report.emailMetadata.subject} />
+            <Field label="Date" value={report.emailMetadata.date} mono />
+            <Field label="Message-ID" value={report.emailMetadata.messageId} mono />
+            <Field label="Attachments" value={String(report.emailMetadata.attachmentCount)} mono />
+          </div>
+        ) : (
+          <div className="text-[11px] text-ink-600">Email metadata unavailable</div>
+        )}
       </ReportSection>
 
       <ReportSection num={4} title="Authentication" provenance="deterministic">
-        <div className="grid grid-cols-3 gap-3 mb-4">
-          <AuthMini label="SPF" status={email.spf} />
-          <AuthMini label="DKIM" status={email.dkim} />
-          <AuthMini label="DMARC" status={email.dmarc} />
-        </div>
-        <p className="text-[12px] text-ink-400 leading-relaxed">{email.authenticationSummary}</p>
+        {report.authentication.status === 'AVAILABLE' ? (
+          <div className="grid grid-cols-3 gap-3">
+            <AuthMini label="SPF" status={report.authentication.spf?.result ?? 'unavailable'} />
+            <AuthMini label="DKIM" status={report.authentication.dkim?.result ?? 'unavailable'} />
+            <AuthMini label="DMARC" status={report.authentication.dmarc?.result ?? 'unavailable'} />
+          </div>
+        ) : (
+          <div className="text-[11px] text-ink-600">Authentication data unavailable</div>
+        )}
       </ReportSection>
 
       <ReportSection num={5} title="Header Forensics" provenance="observed">
-        <div className="max-h-64 overflow-y-auto scrollbar-thin divide-y divide-base-500/10">
-          {Object.entries(email.headers).map(([k, v]) => (
-            <div key={k} className="flex items-start gap-4 py-2">
-              <span className="mono text-[10px] text-ink-500 w-40 shrink-0">{k}</span>
-              <span className="mono text-[11px] text-ink-300 break-all">{v}</span>
-            </div>
-          ))}
-        </div>
+        {report.headerForensics.anomalies.length > 0 ? (
+          <div className="space-y-2">
+            {report.headerForensics.anomalies.map((a, i) => (
+              <div key={i} className="panel-2 p-3">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="mono text-[10px] text-ink-500">{a.type}</span>
+                  <Badge variant={a.severity === 'high' ? 'danger' : a.severity === 'medium' ? 'warning' : 'neutral'}>{a.severity}</Badge>
+                </div>
+                <div className="text-[11px] text-ink-300">{a.message}</div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-[11px] text-ink-600">No header anomalies detected ({report.headerForensics.status})</div>
+        )}
       </ReportSection>
 
       <ReportSection num={6} title="Received Relay Chain" provenance="observed">
-        {email.receivedChain.length > 0 ? (
+        {report.headerForensics.receivedChain.length > 0 ? (
           <div className="space-y-2.5">
-            {email.receivedChain.map((hop, i) => (
-              <div key={i} className="panel-2 p-3 grid grid-cols-4 gap-3 items-center">
+            {report.headerForensics.receivedChain.map((hop) => (
+              <div key={hop.hop} className="panel-2 p-3 grid grid-cols-4 gap-3 items-center">
                 <span className="mono text-[10px] text-accent-500">Hop {hop.hop}</span>
-                <span className="mono text-[11px] text-ink-300 truncate">{hop.from}</span>
-                <span className="mono text-[11px] text-ink-300 truncate">{hop.by}</span>
-                <span className="mono text-[10px] text-ink-500">{hop.timestamp}</span>
-                {hop.from.includes('unknown') && <Badge variant="warning" className="col-span-4 w-fit">Inferred: Forged Hop</Badge>}
+                <span className="mono text-[11px] text-ink-300 truncate">{hop.fromHostname ?? hop.fromIp ?? 'unknown'}</span>
+                <span className="mono text-[11px] text-ink-300 truncate">{hop.byHostname ?? 'unknown'}</span>
+                <span className="mono text-[10px] text-ink-500">{hop.timestampIso ?? 'unavailable'}</span>
               </div>
             ))}
           </div>
@@ -244,37 +272,67 @@ function FullReport({ email }: { email: ScannedEmail }) {
       </ReportSection>
 
       <ReportSection num={7} title="Threat Assessment" provenance="deterministic">
-        <div className="grid grid-cols-4 gap-3 mb-4">
-          <Field label="Threat Score" value={String(email.threatScore)} mono />
-          <Field label="Risk Level" value={email.riskLevel} />
-          <Field label="Classification" value={email.classification} />
-          <Field label="Status" value={email.status} />
-        </div>
-        <p className="text-[12px] text-ink-400 leading-relaxed">{email.threatSummary}</p>
+        {risk.status === 'AVAILABLE' ? (
+          <>
+            <div className="grid grid-cols-5 gap-3 mb-4">
+              <Field label="Overall Risk" value={risk.score !== null ? String(risk.score) : null} mono />
+              <Field label="Risk Level" value={risk.level} />
+              <Field label="Classification" value={risk.classification} />
+              <Field label="Risk Confidence" value={risk.confidence !== null ? `${Math.round(risk.confidence * 100)}%` : null} mono />
+              <Field label="Evidence Coverage" value={risk.evidenceCoverage !== null ? `${Math.round(risk.evidenceCoverage * 100)}%` : null} mono />
+            </div>
+            {risk.categoryScores && (
+              <div className="grid grid-cols-5 gap-2">
+                {Object.entries(risk.categoryScores).map(([category, result]) => (
+                  <div key={category} className="panel-2 p-2.5 text-center">
+                    <div className="text-[9px] uppercase tracking-wider text-ink-500 mb-1">{category}</div>
+                    <div className="text-[13px] font-bold text-ink-200">{result.score ?? '—'}</div>
+                    <div className="text-[8px] text-ink-600 mt-0.5">{result.status}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="text-[11px] text-ink-600">Insufficient evidence to compute a threat score</div>
+        )}
       </ReportSection>
 
       <ReportSection num={8} title="Indicators" provenance="external">
-        <div className="grid grid-cols-5 gap-2 mb-3">
-          {(['IP', 'Domain', 'URL', 'Hash', 'Email'] as const).map((type) => (
-            <div key={type} className="panel-2 p-2 text-center">
-              <div className="text-[14px] font-bold text-ink-200">{email.indicators.filter((i) => i.type === type).length}</div>
-              <div className="text-[8px] text-ink-600 uppercase tracking-wider mt-0.5">{type}</div>
-            </div>
-          ))}
-        </div>
-        <div className="text-[10px] text-ink-600">{email.indicators.length} total indicators processed — see the Indicators tab for full detail.</div>
+        {report.iocs.status === 'AVAILABLE' ? (
+          <div className="grid grid-cols-5 gap-2 mb-3">
+            {([
+              ['IP', report.iocs.ips.length],
+              ['Domain', report.iocs.domains.length],
+              ['URL', report.iocs.urls.length],
+              ['Hash', report.iocs.hashes.length],
+              ['Email', report.iocs.emails.length],
+            ] as const).map(([type, count]) => (
+              <div key={type} className="panel-2 p-2 text-center">
+                <div className="text-[14px] font-bold text-ink-200">{count}</div>
+                <div className="text-[8px] text-ink-600 uppercase tracking-wider mt-0.5">{type}</div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-[11px] text-ink-600">No IOC data available</div>
+        )}
       </ReportSection>
 
       <ReportSection num={9} title="URL / Domain Analysis" provenance="external">
-        {urlDomainIocs.length > 0 ? (
+        {report.urlDomainAnalysis.status === 'AVAILABLE' ? (
           <div className="space-y-1.5">
-            {urlDomainIocs.map((ioc) => (
-              <div key={ioc.id} className="flex items-center gap-2 text-[11px] panel-2 px-2.5 py-2">
-                <span className="mono text-ink-600 w-14 uppercase text-[9px]">{ioc.type}</span>
-                <span className="text-ink-300 truncate mono flex-1">{ioc.value}</span>
-                <span className={cn('text-[9px] font-semibold uppercase', ioc.reputation === 'malicious' ? 'text-accent-400' : ioc.reputation === 'suspicious' ? 'text-amber-400' : ioc.reputation === 'clean' ? 'text-emerald-400' : 'text-ink-500')}>
-                  {ioc.reputation === 'unknown' ? 'Unavailable' : ioc.reputation}
-                </span>
+            {report.urlDomainAnalysis.domains.map((d, i) => (
+              <div key={`d-${i}`} className="flex items-center gap-2 text-[11px] panel-2 px-2.5 py-2">
+                <span className="mono text-ink-600 w-16 uppercase text-[9px]">domain</span>
+                <span className="text-ink-300 truncate mono flex-1">{d.domain}</span>
+                {d.lookalikeOf && <Badge variant="warning">resembles {d.lookalikeOf}</Badge>}
+              </div>
+            ))}
+            {report.urlDomainAnalysis.urls.map((u, i) => (
+              <div key={`u-${i}`} className="flex items-center gap-2 text-[11px] panel-2 px-2.5 py-2">
+                <span className="mono text-ink-600 w-16 uppercase text-[9px]">url</span>
+                <span className="text-ink-300 truncate mono flex-1">{u.url}</span>
               </div>
             ))}
           </div>
@@ -284,15 +342,13 @@ function FullReport({ email }: { email: ScannedEmail }) {
       </ReportSection>
 
       <ReportSection num={10} title="Infrastructure / Geolocation" provenance="external">
-        {email.geoData.length > 0 ? (
+        {report.infrastructure ? (
           <div className="grid grid-cols-3 gap-3">
-            {email.geoData.map((geo) => (
-              <div key={geo.ip} className="panel-2 p-3">
-                <div className="mono text-[11px] text-ink-200 mb-1.5">{geo.ip}</div>
-                <div className="text-[10px] text-ink-500">{geo.city}, {geo.country}</div>
-                <div className="text-[10px] text-ink-600 mt-1">ISP: {geo.isp} · ASN: {geo.asn}</div>
-              </div>
-            ))}
+            <div className="panel-2 p-3">
+              <div className="mono text-[11px] text-ink-200 mb-1.5">{report.infrastructure.candidateIp ?? 'UNAVAILABLE'}</div>
+              <div className="text-[10px] text-ink-500">{report.infrastructure.city ?? '—'}, {report.infrastructure.country ?? '—'}</div>
+              <div className="text-[10px] text-ink-600 mt-1">ISP: {report.infrastructure.isp ?? '—'} · ASN: {report.infrastructure.asn ?? '—'}</div>
+            </div>
           </div>
         ) : (
           <div className="text-[11px] text-ink-600">No infrastructure geolocation data available</div>
@@ -300,54 +356,77 @@ function FullReport({ email }: { email: ScannedEmail }) {
       </ReportSection>
 
       <ReportSection num={11} title="ML Assessment" provenance="ml">
-        <div className="grid grid-cols-3 gap-3">
-          <Field label="Model Output Score" value={String(email.threatScore)} mono />
-          <Field label="Classification" value={email.classification} />
-          <Field label="Risk Level" value={email.riskLevel} />
-        </div>
+        {ml && ml.status === 'AVAILABLE' ? (
+          <div className="grid grid-cols-4 gap-3">
+            <Field label="Model" value={ml.model} mono />
+            <Field label="Model Version" value={ml.modelVersion} mono />
+            <Field label="Classification" value={ml.classification} />
+            <Field label="Probability" value={ml.probability !== null ? `${Math.round(ml.probability * 100)}%` : null} mono />
+          </div>
+        ) : (
+          <div className="text-[11px] text-ink-600">ML UNAVAILABLE — {ml?.status ?? 'not run'}</div>
+        )}
       </ReportSection>
 
       <ReportSection num={12} title="AI Assessment" provenance="ai">
-        <div className="mb-3">
-          <Field label="Model Confidence" value={`${confidence}%`} mono />
-        </div>
-        <p className="text-[12px] text-ink-400 leading-relaxed">{email.threatSummary}</p>
+        {ai && ai.status === 'AVAILABLE' ? (
+          <>
+            <div className="grid grid-cols-3 gap-3 mb-3">
+              <Field label="Attack Type" value={ai.attackType} />
+              <Field label="AI Content Score" value={ai.aiContentScore !== null ? `${Math.round(ai.aiContentScore * 100)}%` : null} mono />
+              <Field label="Phishing Intent" value={ai.phishingIntent !== null ? `${Math.round(ai.phishingIntent * 100)}%` : null} mono />
+            </div>
+            <p className="text-[12px] text-ink-400 leading-relaxed">{ai.summary}</p>
+          </>
+        ) : (
+          <div className="text-[11px] text-ink-600">AI UNAVAILABLE — {ai?.status ?? 'no provider configured'}</div>
+        )}
       </ReportSection>
 
       <ReportSection num={13} title="Related Campaigns / Emails" provenance="inferred">
-        <div className="panel-2 p-3 mb-3">
-          <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-1">Related Emails In Case</div>
-          <div className="text-[12px] text-ink-200">
-            {email.caseId ? `${relatedCount} other email${relatedCount === 1 ? '' : 's'} in ${email.caseId}` : 'Not part of a case'}
-          </div>
-        </div>
-        <div className="flex items-center gap-1.5 mb-2">
-          <Radar className="w-3 h-3 text-sky-400" />
-          <span className="text-[9px] font-semibold uppercase tracking-wider text-ink-500">Likely Related Campaign</span>
-        </div>
-        <div className="grid grid-cols-4 gap-3">
-          <Field label="Campaign ID" value={null} />
-          <Field label="Shared Indicators" value={null} />
-          <Field label="Shared Infrastructure" value={null} />
-          <Field label="Correlation Confidence" value={null} />
-        </div>
+        {campaign.available && campaign.relatedEmailIds.length > 0 ? (
+          <>
+            <div className="flex items-center gap-1.5 mb-2">
+              <Radar className="w-3 h-3 text-sky-400" />
+              <span className="text-[9px] font-semibold uppercase tracking-wider text-ink-500">Likely Related Campaign</span>
+            </div>
+            <div className="grid grid-cols-4 gap-3">
+              <Field label="Campaign ID" value={campaign.campaignId} mono />
+              <Field label="Related Emails" value={String(campaign.relatedEmailIds.length)} />
+              <Field label="Shared Indicators" value={campaign.sharedIndicators.length ? String(campaign.sharedIndicators.length) : null} />
+              <Field label="Correlation Confidence" value={`${Math.round(campaign.confidence * 100)}%`} mono />
+            </div>
+          </>
+        ) : (
+          <div className="text-[11px] text-ink-600">No related emails or campaign correlation found</div>
+        )}
       </ReportSection>
 
-      <ReportSection num={14} title="Recommended Actions" provenance="ai">
-        {recommendedAction ? (
-          <p className="text-[12px] text-ink-300 leading-relaxed whitespace-pre-line">{recommendedAction}</p>
+      <ReportSection num={14} title="Recommended Actions" provenance="deterministic">
+        {report.recommendedActions.length > 0 ? (
+          <ul className="space-y-3">
+            {report.recommendedActions.map((rec, i) => (
+              <li key={i} className="text-[12px]">
+                <div className="flex items-center gap-2 mb-1">
+                  <Badge variant={rec.priority === 'critical' || rec.priority === 'high' ? 'danger' : 'neutral'}>{rec.priority}</Badge>
+                  <span className="mono text-[11px] text-ink-200 font-semibold">{rec.action}</span>
+                </div>
+                <p className="text-ink-400">{rec.reason}</p>
+              </li>
+            ))}
+          </ul>
         ) : (
-          <div className="text-[11px] text-ink-600">No recommended actions available</div>
+          <div className="text-[11px] text-ink-600">No recommended actions for this email</div>
         )}
       </ReportSection>
 
       <ReportSection num={15} title="Why Flagged" provenance="deterministic">
-        {email.whyFlagged.length > 0 ? (
+        {report.whyFlagged.length > 0 ? (
           <ul className="space-y-2">
-            {email.whyFlagged.map((reason, i) => (
+            {report.whyFlagged.map((item, i) => (
               <li key={i} className="flex items-start gap-3 text-[12px] text-ink-300 leading-relaxed">
                 <span className="mono text-[10px] text-accent-600 mt-0.5 shrink-0">{String(i + 1).padStart(2, '0')}</span>
-                <span>{reason}</span>
+                <span>{item.message}</span>
               </li>
             ))}
           </ul>
@@ -370,18 +449,12 @@ function FullReport({ email }: { email: ScannedEmail }) {
 
       <ReportSection num={17} title="Limitations">
         <ul className="space-y-2.5">
-          <li className="flex items-start gap-2.5 text-[12px] text-ink-300 leading-relaxed">
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
-            <span>Geolocation represents probable network infrastructure and does not establish attacker identity or physical location.</span>
-          </li>
-          <li className="flex items-start gap-2.5 text-[12px] text-ink-300 leading-relaxed">
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
-            <span>Threat scores are analytical risk assessments and are not legal conclusions.</span>
-          </li>
-          <li className="flex items-start gap-2.5 text-[12px] text-ink-500 leading-relaxed">
-            <ShieldQuestion className="w-3.5 h-3.5 text-ink-600 mt-0.5 shrink-0" />
-            <span>This report is generated from mock analysis data in a frontend prototype and has not been reviewed by a human analyst.</span>
-          </li>
+          {report.limitations.map((limitation, i) => (
+            <li key={i} className="flex items-start gap-2.5 text-[12px] text-ink-300 leading-relaxed">
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
+              <span>{limitation}</span>
+            </li>
+          ))}
           <li className="flex items-start gap-2.5 text-[12px] text-ink-500 leading-relaxed">
             <ShieldQuestion className="w-3.5 h-3.5 text-ink-600 mt-0.5 shrink-0" />
             <span>Fields marked UNAVAILABLE reflect data the backend has not yet supplied, not a negative finding.</span>
