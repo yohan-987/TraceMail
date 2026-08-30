@@ -1,0 +1,794 @@
+From afe1a7ebe60b560ae6457b161f39c5883906ca9c Mon Sep 17 00:00:00 2001
+From: Yohan <you@example.com>
+Date: Fri, 28 Aug 2026 18:48:33 +0000
+Subject: [PATCH] Batch 5C: recommended investigator actions
+
+- GET /api/v1/emails/:emailId now attaches advisory 'recommendations'
+  (action, priority, reason, supportingEvidence), derived from stored
+  risk/domain/infrastructure results plus a Batch 5B correlation check
+- recommendations.ts: never executes actions; never relies solely on the
+  LLM assessment; never fabricates evidence; missing-evidence case takes
+  priority and short-circuits other recommendations
+- new types: RecommendedActionType, RecommendationPriority, Recommendation
+- 17 new tests (recommendations.test.ts, emails-recommendations.test.ts),
+  211/211 passing
+- npm run build clean
+---
+ .../backend/src/analyzers/recommendations.ts  | 191 +++++++++
+ backend-batch3.5/backend/src/routes/emails.ts |  13 +-
+ backend-batch3.5/backend/src/schemas/types.ts |  23 +
+ .../tests/emails-recommendations.test.ts      |  92 ++++
+ .../backend/tests/recommendations.test.ts     | 393 ++++++++++++++++++
+ 5 files changed, 711 insertions(+), 1 deletion(-)
+ create mode 100644 backend-batch3.5/backend/src/analyzers/recommendations.ts
+ create mode 100644 backend-batch3.5/backend/tests/emails-recommendations.test.ts
+ create mode 100644 backend-batch3.5/backend/tests/recommendations.test.ts
+
+diff --git a/backend-batch3.5/backend/src/analyzers/recommendations.ts b/backend-batch3.5/backend/src/analyzers/recommendations.ts
+new file mode 100644
+index 0000000..e90df98
+--- /dev/null
++++ b/backend-batch3.5/backend/src/analyzers/recommendations.ts
+@@ -0,0 +1,191 @@
++import type {
++  EmailRecord,
++  Recommendation,
++  RecommendationPriority,
++  RecommendedActionType,
++  RelatedEmailsResponse,
++  RiskEvidenceItem,
++} from "../schemas/types";
++
++// Batch 5C — advisory, explainable investigator recommendations built
++// only from ALREADY-STORED evidence: the deterministic risk assessment
++// (categoryScores/explanations), domain analysis, infrastructure
++// assessment, and (optionally) Batch 5B correlation results. This module
++// never executes anything — no quarantine, block, contact, or firewall
++// action is taken here or anywhere downstream of it; every returned
++// object is a suggestion for a human investigator to act on.
++//
++// Deliberately excluded as a trigger input: aiAssessment (the LLM's
++// semantic read). The spec requires recommendations not be based
++// SOLELY on an LLM statement — the simplest way to guarantee that is to
++// never let it originate one; deterministic risk/domain/infra/
++// correlation evidence is what triggers every recommendation below.
++
++const LEVEL_TO_PRIORITY: Record<string, RecommendationPriority> = {
++  critical: "critical",
++  high: "high",
++  moderate: "medium",
++  low: "low",
++};
++
++function evidenceRef(item: RiskEvidenceItem): string {
++  return `${item.type}: ${item.message}`;
++}
++
++function topEvidence(evidence: RiskEvidenceItem[], n: number): string[] {
++  return [...evidence]
++    .sort((a, b) => b.weight - a.weight)
++    .slice(0, n)
++    .map(evidenceRef);
++}
++
++function pushIfAbsent(list: Recommendation[], rec: Recommendation): void {
++  if (!list.some((r) => r.action === rec.action)) list.push(rec);
++}
++
++/**
++ * Builds the recommended-actions list for one already-scored
++ * EmailRecord. `relatedEmails`, when supplied, is a Batch 5B
++ * correlation result for the same email — passing it in (rather than
++ * this module computing it itself) keeps this a pure function of data
++ * the caller already has, and keeps it independently testable without
++ * a full stored-email corpus.
++ */
++export function generateRecommendations(
++  record: EmailRecord,
++  relatedEmails: RelatedEmailsResponse | null = null
++): Recommendation[] {
++  const recommendations: Recommendation[] = [];
++  const risk = record.risk;
++  const explanations = record.explanations ?? [];
++
++  // --- Insufficient evidence takes priority over everything else: a
++  // score computed from partial evidence should not also trigger
++  // quarantine/warn recommendations that imply full confidence. ---
++  if (!risk || risk.score === null || risk.level === null) {
++    const unavailable: string[] = [];
++    if (risk?.categoryScores) {
++      for (const [category, result] of Object.entries(risk.categoryScores)) {
++        if (result.status !== "AVAILABLE") unavailable.push(`${category}: ${result.status}`);
++      }
++    } else {
++      unavailable.push("risk assessment: not computed");
++    }
++    pushIfAbsent(recommendations, {
++      action: "COLLECT_ADDITIONAL_EVIDENCE",
++      priority: "medium",
++      reason:
++        "The deterministic risk assessment could not reach a score because too few categories had available evidence. Gather more evidence before relying on an automated verdict.",
++      supportingEvidence: unavailable.length > 0 ? unavailable : ["no analysis categories were available"],
++    });
++    return recommendations;
++  }
++
++  const priority = LEVEL_TO_PRIORITY[risk.level] ?? "low";
++
++  // --- QUARANTINE_EMAIL: strong deterministic risk. ---
++  if (risk.level === "high" || risk.level === "critical") {
++    recommendations.push({
++      action: "QUARANTINE_EMAIL",
++      priority,
++      reason: `Deterministic risk assessment classified this email as ${risk.level} risk (score ${risk.score}/100, classification: ${risk.classification ?? "unclassified"}).`,
++      supportingEvidence: topEvidence(explanations, 3),
++    });
++  }
++
++  // --- WARN_RECIPIENT: moderate-or-above risk with a non-legitimate
++  // classification — the recipient should be cautioned even when the
++  // email isn't yet strong enough to quarantine outright. ---
++  if (
++    (risk.level === "moderate" || risk.level === "high" || risk.level === "critical") &&
++    risk.classification &&
++    risk.classification !== "legitimate"
++  ) {
++    recommendations.push({
++      action: "WARN_RECIPIENT",
++      priority,
++      reason: `This email was classified as "${risk.classification}" with ${risk.level} risk (score ${risk.score}/100). The recipient should be cautioned before interacting with it.`,
++      supportingEvidence: topEvidence(explanations, 3),
++    });
++  }
++
++  // --- REVIEW_BLOCK_DOMAIN: a domain was flagged as a look-alike of a
++  // trusted brand, or a URL used a raw-IP host — both are urlDomain
++  // category evidence already computed by Batch 3. ---
++  const domainEvidence = explanations.filter(
++    (e) => e.type === "possible_lookalike_domain" || e.type === "raw_ip_host"
++  );
++  const lookalikeDomains = (record.domainAnalysis?.domains ?? []).filter((d) => d.lookalikeOf);
++  if (domainEvidence.length > 0 || lookalikeDomains.length > 0) {
++    const evidenceRefs =
++      domainEvidence.length > 0
++        ? topEvidence(domainEvidence, 3)
++        : lookalikeDomains
++            .slice(0, 3)
++            .map((d) => `possible_lookalike_domain: "${d.domain}" resembles trusted domain "${d.lookalikeOf}"`);
++    recommendations.push({
++      action: "REVIEW_BLOCK_DOMAIN",
++      priority: risk.level === "critical" || risk.level === "high" ? "high" : "medium",
++      reason:
++        "One or more domains or links in this email were flagged as a likely look-alike of a trusted brand or used a raw IP address as a host — review for blocklisting.",
++      supportingEvidence: evidenceRefs,
++    });
++  }
++
++  // --- INVESTIGATE_SOURCE_INFRASTRUCTURE: infrastructure category
++  // evidence actually fired (suspicious ASN/IP, cloud/VPS indicator,
++  // multiple anomalous source IPs, confirmed external intel), or the
++  // infrastructure assessment could only reach an INCONCLUSIVE/ERROR
++  // status and warrants a manual look. ---
++  const infraEvidence = explanations.filter((e) => e.category === "infrastructure");
++  const infra = record.infrastructure;
++  if (infraEvidence.length > 0 || infra?.status === "INCONCLUSIVE" || infra?.status === "ERROR") {
++    recommendations.push({
++      action: "INVESTIGATE_SOURCE_INFRASTRUCTURE",
++      priority: infraEvidence.some((e) => e.severity === "high") ? "high" : "medium",
++      reason:
++        infraEvidence.length > 0
++          ? "Infrastructure enrichment flagged anomalies in the email's candidate source IP(s) — review before drawing conclusions about origin."
++          : `Infrastructure enrichment reached status ${infra?.status} and could not be fully resolved — manual review of source infrastructure is recommended.`,
++      supportingEvidence:
++        infraEvidence.length > 0
++          ? topEvidence(infraEvidence, 3)
++          : [`infrastructure status: ${infra?.status ?? "unknown"}`],
++    });
++  }
++
++  // --- REVIEW_RELATED_EMAILS: Batch 5B correlation found related
++  // emails. Only fires when the caller actually supplied a correlation
++  // result — this module never computes it itself. ---
++  if (relatedEmails && relatedEmails.relatedEmailIds.length > 0) {
++    recommendations.push({
++      action: "REVIEW_RELATED_EMAILS",
++      priority: relatedEmails.confidence >= 0.5 ? "high" : "medium",
++      reason: relatedEmails.campaignId
++        ? `This email shares evidence with ${relatedEmails.relatedEmailIds.length} other stored email(s), grouped under Potentially Related Campaign ${relatedEmails.campaignId} (confidence ${relatedEmails.confidence}). This does not confirm a threat-actor identity.`
++        : `This email shares evidence with ${relatedEmails.relatedEmailIds.length} other stored email(s) (confidence ${relatedEmails.confidence}).`,
++      supportingEvidence: [
++        ...relatedEmails.sharedIndicators.slice(0, 3),
++        ...relatedEmails.sharedInfrastructure.slice(0, 2),
++      ],
++    });
++  }
++
++  // --- COLLECT_ADDITIONAL_EVIDENCE: even when a score was reached,
++  // coverage across the five risk categories may still be partial. ---
++  if (risk.evidenceCoverage !== null && risk.evidenceCoverage < 0.8) {
++    const unavailable = risk.categoryScores
++      ? Object.entries(risk.categoryScores)
++          .filter(([, result]) => result.status !== "AVAILABLE")
++          .map(([category, result]) => `${category}: ${result.status}`)
++      : [];
++    pushIfAbsent(recommendations, {
++      action: "COLLECT_ADDITIONAL_EVIDENCE",
++      priority: "low",
++      reason: `Only ${Math.round(risk.evidenceCoverage * 100)}% of risk categories had available evidence when this assessment was computed. Additional evidence would strengthen confidence.`,
++      supportingEvidence: unavailable.length > 0 ? unavailable : [`evidence coverage: ${risk.evidenceCoverage}`],
++    });
++  }
++
++  return recommendations;
++}
+diff --git a/backend-batch3.5/backend/src/routes/emails.ts b/backend-batch3.5/backend/src/routes/emails.ts
+index 7af2ad3..8d8f0a0 100644
+--- a/backend-batch3.5/backend/src/routes/emails.ts
++++ b/backend-batch3.5/backend/src/routes/emails.ts
+@@ -16,6 +16,7 @@ import { assessAi } from "../analyzers/aiAssessment";
+ import { analyzeInfrastructure } from "../analyzers/infrastructure";
+ import { buildInfrastructureGraph } from "../analyzers/infrastructureGraph";
+ import { correlateEmail } from "../analyzers/correlation";
++import { generateRecommendations } from "../analyzers/recommendations";
+ import { geoIpProviderFromEnv } from "../services/geoipClient";
+ import { dnsProviderFromEnv } from "../services/dnsClient";
+ import { llmProviderFromEnv } from "../services/llmClient";
+@@ -193,13 +194,23 @@ emailsRouter.get("/emails", async (req: Request, res: Response, next: NextFuncti
+ 
+ // GET /api/v1/emails/:emailId — stored full investigation for one email.
+ // Does not re-run expensive analyzers; returns persisted Batch 1–4 data.
++// Batch 5C: also attaches advisory `recommendations`, derived from the
++// stored risk/domain/infrastructure results plus a fresh (cheap, O(n))
++// Batch 5B correlation check — never executed actions, never re-runs
++// ML/LLM/GeoIP/DNS.
+ emailsRouter.get(
+   "/emails/:emailId",
+   async (req: Request, res: Response, next: NextFunction) => {
+     try {
+       const record = await getEmailRecord(req.params.emailId);
+       if (!record) throw Errors.emailNotFound(req.params.emailId);
+-      return res.status(200).json(toPublicEmailRecord(record));
++      const allRecords = await listAllEmailRecords();
++      const relatedEmails = correlateEmail(record, allRecords);
++      const recommendations = generateRecommendations(record, relatedEmails);
++      return res.status(200).json({
++        ...toPublicEmailRecord(record),
++        recommendations,
++      });
+     } catch (err) {
+       return next(err);
+     }
+diff --git a/backend-batch3.5/backend/src/schemas/types.ts b/backend-batch3.5/backend/src/schemas/types.ts
+index 843e74b..fecf35c 100644
+--- a/backend-batch3.5/backend/src/schemas/types.ts
++++ b/backend-batch3.5/backend/src/schemas/types.ts
+@@ -462,6 +462,29 @@ export interface RelatedEmailsResponse {
+   reasons: string[];
+ }
+ 
++// --- Recommended investigator actions (Batch 5C) ------------------------
++// Derived on demand from stored risk/domain/infrastructure/correlation
++// results — advisory only. The backend never executes quarantine, block,
++// contact, or firewall actions; these are suggestions for a human
++// investigator, each required to cite the stored evidence it rests on.
++export type RecommendedActionType =
++  | "QUARANTINE_EMAIL"
++  | "REVIEW_BLOCK_DOMAIN"
++  | "WARN_RECIPIENT"
++  | "REVIEW_RELATED_EMAILS"
++  | "INVESTIGATE_SOURCE_INFRASTRUCTURE"
++  | "COLLECT_ADDITIONAL_EVIDENCE";
++
++export type RecommendationPriority = "low" | "medium" | "high" | "critical";
++
++export interface Recommendation {
++  action: RecommendedActionType;
++  priority: RecommendationPriority;
++  reason: string;
++  /** Short, human-readable references to the specific stored evidence this rests on — never invented. */
++  supportingEvidence: string[];
++}
++
+ export interface ScanAcceptedResponse {
+   emailId: string;
+   caseId: string | null;
+diff --git a/backend-batch3.5/backend/tests/emails-recommendations.test.ts b/backend-batch3.5/backend/tests/emails-recommendations.test.ts
+new file mode 100644
+index 0000000..035b9e5
+--- /dev/null
++++ b/backend-batch3.5/backend/tests/emails-recommendations.test.ts
+@@ -0,0 +1,92 @@
++import { describe, it } from "node:test";
++import assert from "node:assert/strict";
++import fs from "fs";
++import os from "os";
++import path from "path";
++import request from "supertest";
++import { createApp } from "../src/app";
++import { resetMlModelCache } from "../src/analyzers/mlClassifier";
++
++const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "sih-recommendations-"));
++process.env.EMAIL_DATA_DIR = dataDir;
++process.env.DNS_INTEL_ENABLED = "0";
++process.env.ML_MODEL_PATH = path.join(__dirname, "missing-ml-model.json");
++delete process.env.LLM_API_KEY;
++delete process.env.GEOIP_API_URL;
++resetMlModelCache();
++const app = createApp();
++
++function eml(fields: { from: string; to: string; subject: string; body: string }): Buffer {
++  return Buffer.from(
++    [
++      `From: ${fields.from}`,
++      `To: ${fields.to}`,
++      `Subject: ${fields.subject}`,
++      "",
++      fields.body,
++      "",
++    ].join("\r\n"),
++    "utf-8"
++  );
++}
++
++async function scan(fields: { from: string; to: string; subject: string; body: string }, filename: string) {
++  const res = await request(app).post("/api/v1/emails/scan").attach("file", eml(fields), filename);
++  assert.equal(res.status, 201);
++  return res.body.emailId as string;
++}
++
++describe("GET /emails/:emailId — recommendations (Batch 5C)", { concurrency: false }, () => {
++  it("attaches an array of recommendations to the stored-email response", async () => {
++    const id = await scan(
++      {
++        from: '"PayPal" <alert@paypa1-secure-login.com>',
++        to: "victim@example.org",
++        subject: "Urgent: verify your account or it will be suspended",
++        body: '<a href="http://paypa1-secure-login.com/verify">click here now</a>',
++      },
++      "phish.eml"
++    );
++
++    const res = await request(app).get(`/api/v1/emails/${id}`);
++    assert.equal(res.status, 200);
++    assert.ok(Array.isArray(res.body.recommendations));
++    for (const rec of res.body.recommendations) {
++      assert.ok(rec.action);
++      assert.ok(rec.priority);
++      assert.ok(rec.reason);
++      assert.ok(Array.isArray(rec.supportingEvidence));
++    }
++  });
++
++  it("finds REVIEW_RELATED_EMAILS once a second, evidence-sharing email is scanned", async () => {
++    const idA = await scan(
++      {
++        from: "x@shared-campaign-example.com",
++        to: "v1@example.org",
++        subject: "Invoice attached",
++        body: '<a href="http://shared-campaign-example.com/pay">pay</a>',
++      },
++      "e1.eml"
++    );
++    await scan(
++      {
++        from: "x@shared-campaign-example.com",
++        to: "v2@example.org",
++        subject: "Invoice attached",
++        body: '<a href="http://shared-campaign-example.com/pay">pay</a>',
++      },
++      "e2.eml"
++    );
++
++    const res = await request(app).get(`/api/v1/emails/${idA}`);
++    assert.equal(res.status, 200);
++    const actions = (res.body.recommendations as { action: string }[]).map((r) => r.action);
++    assert.ok(actions.includes("REVIEW_RELATED_EMAILS"));
++  });
++
++  it("returns 404 for a nonexistent emailId without crashing on recommendation generation", async () => {
++    const res = await request(app).get("/api/v1/emails/EMAIL-DOES-NOT-EXIST");
++    assert.equal(res.status, 404);
++  });
++});
+diff --git a/backend-batch3.5/backend/tests/recommendations.test.ts b/backend-batch3.5/backend/tests/recommendations.test.ts
+new file mode 100644
+index 0000000..1824be9
+--- /dev/null
++++ b/backend-batch3.5/backend/tests/recommendations.test.ts
+@@ -0,0 +1,393 @@
++import { describe, it } from "node:test";
++import assert from "node:assert/strict";
++import { generateRecommendations } from "../src/analyzers/recommendations";
++import type {
++  DomainAnalysis,
++  EmailRecord,
++  InfrastructureAssessment,
++  ParsedEmail,
++  RelatedEmailsResponse,
++  RiskAssessment,
++  RiskEvidenceItem,
++} from "../src/schemas/types";
++
++function parsedEmail(emailId: string, extras?: Partial<ParsedEmail>): ParsedEmail {
++  return {
++    emailId,
++    subject: "Test subject",
++    from: [{ displayName: null, email: "a@example.com", localPart: "a", domain: "example.com" }],
++    to: [{ displayName: null, email: "victim@example.org", localPart: "victim", domain: "example.org" }],
++    cc: [],
++    bcc: [],
++    replyTo: [],
++    returnPath: [],
++    date: null,
++    messageId: null,
++    headers: { normalized: {}, raw: [] },
++    body: { text: null, html: null },
++    attachments: [],
++    ...extras,
++  };
++}
++
++function categoryResult(status: "AVAILABLE" | "NOT_APPLICABLE" | "UNAVAILABLE", score: number | null, evidence: RiskEvidenceItem[] = []) {
++  return { score: status === "AVAILABLE" ? score : null, status, evidence };
++}
++
++function risk(overrides: Partial<RiskAssessment> = {}): RiskAssessment {
++  return {
++    emailId: "EMAIL-A",
++    categoryScores: {
++      technical: categoryResult("AVAILABLE", 0),
++      identity: categoryResult("AVAILABLE", 0),
++      urlDomain: categoryResult("AVAILABLE", 0),
++      content: categoryResult("AVAILABLE", 0),
++      infrastructure: categoryResult("AVAILABLE", 0),
++    },
++    score: 10,
++    level: "low",
++    classification: "legitimate",
++    confidence: 0.4,
++    evidenceCoverage: 1,
++    ...overrides,
++  };
++}
++
++function record(overrides: Partial<EmailRecord> = {}): EmailRecord {
++  return {
++    emailId: "EMAIL-A",
++    caseId: null,
++    evidence: {
++      filename: "a.eml",
++      sha256: "a".repeat(64),
++      fileSizeBytes: 100,
++      createdAt: "2026-08-28T00:00:00.000Z",
++      storagePath: "data/emails/EMAIL-A/original.eml",
++    },
++    parsedEmail: parsedEmail("EMAIL-A"),
++    headerAnalysis: null,
++    authentication: null,
++    iocs: null,
++    urlAnalysis: null,
++    domainAnalysis: null,
++    risk: risk(),
++    aiAssessment: null,
++    infrastructure: null,
++    report: null,
++    explanations: [],
++    warnings: [],
++    ...overrides,
++  };
++}
++
++function domainAnalysis(domains: DomainAnalysis["domains"]): DomainAnalysis {
++  return { emailId: "EMAIL-A", domains };
++}
++
++function infra(overrides: Partial<InfrastructureAssessment> = {}): InfrastructureAssessment {
++  return {
++    emailId: "EMAIL-A",
++    candidateIp: null,
++    country: null,
++    region: null,
++    city: null,
++    isp: null,
++    asn: null,
++    confidence: null,
++    status: "AVAILABLE",
++    ipIntelligence: [],
++    domainIntelligence: [],
++    interpretation: "probable_infrastructure",
++    ...overrides,
++  };
++}
++
++function related(overrides: Partial<RelatedEmailsResponse> = {}): RelatedEmailsResponse {
++  return {
++    emailId: "EMAIL-A",
++    campaignId: "CMP-ABCD1234",
++    confidence: 0.6,
++    relatedEmailIds: ["EMAIL-B"],
++    sharedIndicators: ["SHARED_DOMAIN:evil.example"],
++    sharedInfrastructure: [],
++    reasons: ["Likely Related Campaign CMP-ABCD1234: 1 potentially related email(s)."],
++    ...overrides,
++  };
++}
++
++describe("generateRecommendations — high-risk phishing", () => {
++  it("recommends QUARANTINE_EMAIL and WARN_RECIPIENT for a critical-risk phishing email", () => {
++    const ev: RiskEvidenceItem = {
++      type: "possible_lookalike_domain",
++      severity: "high",
++      weight: 35,
++      message: 'Domain "paypa1.com" closely resembles the trusted domain "paypal.com".',
++      evidence: {},
++      category: "urlDomain",
++      provenance: "DETERMINISTIC_ANALYSIS",
++    };
++    const r = record({
++      risk: risk({ score: 92, level: "critical", classification: "phishing" }),
++      explanations: [ev],
++    });
++
++    const recs = generateRecommendations(r, null);
++    const actions = recs.map((x) => x.action);
++    assert.ok(actions.includes("QUARANTINE_EMAIL"));
++    assert.ok(actions.includes("WARN_RECIPIENT"));
++    const quarantine = recs.find((x) => x.action === "QUARANTINE_EMAIL")!;
++    assert.equal(quarantine.priority, "critical");
++    assert.ok(quarantine.reason.includes("critical"));
++    assert.ok(quarantine.supportingEvidence.length > 0);
++  });
++});
++
++describe("generateRecommendations — suspicious domain", () => {
++  it("recommends REVIEW_BLOCK_DOMAIN when a lookalike domain was flagged", () => {
++    const ev: RiskEvidenceItem = {
++      type: "possible_lookalike_domain",
++      severity: "high",
++      weight: 35,
++      message: 'Domain "paypa1.com" closely resembles the trusted domain "paypal.com".',
++      evidence: {},
++      category: "urlDomain",
++      provenance: "DETERMINISTIC_ANALYSIS",
++    };
++    const r = record({
++      risk: risk({ score: 55, level: "moderate", classification: "phishing" }),
++      explanations: [ev],
++      domainAnalysis: domainAnalysis([
++        {
++          domain: "paypa1.com",
++          tld: "com",
++          subdomain: null,
++          hostnameLength: 10,
++          hyphenCount: 0,
++          digitCount: 1,
++          isPunycode: false,
++          lookalikeOf: "paypal.com",
++          similarityScore: 0.9,
++        },
++      ]),
++    });
++
++    const recs = generateRecommendations(r, null);
++    const blockRec = recs.find((x) => x.action === "REVIEW_BLOCK_DOMAIN");
++    assert.ok(blockRec);
++    assert.ok(blockRec!.supportingEvidence.some((s) => s.includes("paypa1.com")));
++  });
++
++  it("recommends REVIEW_BLOCK_DOMAIN for a raw-IP-hosted link even without a lookalike domain", () => {
++    const ev: RiskEvidenceItem = {
++      type: "raw_ip_host",
++      severity: "high",
++      weight: 30,
++      message: "A link uses a raw IP address as its host (203.0.113.5).",
++      evidence: {},
++      category: "urlDomain",
++      provenance: "DETERMINISTIC_ANALYSIS",
++    };
++    const r = record({
++      risk: risk({ score: 60, level: "high", classification: "phishing" }),
++      explanations: [ev],
++    });
++
++    const recs = generateRecommendations(r, null);
++    assert.ok(recs.some((x) => x.action === "REVIEW_BLOCK_DOMAIN"));
++  });
++});
++
++describe("generateRecommendations — related emails", () => {
++  it("recommends REVIEW_RELATED_EMAILS only when a correlation result with related emails is supplied", () => {
++    const r = record({ risk: risk({ score: 40, level: "moderate", classification: "suspicious" }) });
++
++    const withRelated = generateRecommendations(r, related());
++    assert.ok(withRelated.some((x) => x.action === "REVIEW_RELATED_EMAILS"));
++    const rec = withRelated.find((x) => x.action === "REVIEW_RELATED_EMAILS")!;
++    assert.ok(rec.reason.includes("CMP-ABCD1234"));
++    assert.ok(!rec.reason.toLowerCase().includes("confirmed threat actor"));
++
++    const withoutRelated = generateRecommendations(r, related({ relatedEmailIds: [] }));
++    assert.ok(!withoutRelated.some((x) => x.action === "REVIEW_RELATED_EMAILS"));
++
++    const noCorrelationPassed = generateRecommendations(r, null);
++    assert.ok(!noCorrelationPassed.some((x) => x.action === "REVIEW_RELATED_EMAILS"));
++  });
++});
++
++describe("generateRecommendations — infrastructure anomalies", () => {
++  it("recommends INVESTIGATE_SOURCE_INFRASTRUCTURE when infrastructure evidence fired", () => {
++    const ev: RiskEvidenceItem = {
++      type: "suspicious_asn",
++      severity: "medium",
++      weight: 20,
++      message: "GeoIP reported ASN AS999 which is on the configured suspicious-ASN list.",
++      evidence: {},
++      category: "infrastructure",
++      provenance: "EXTERNAL_INTELLIGENCE",
++    };
++    const r = record({
++      risk: risk({ score: 45, level: "moderate", classification: "suspicious" }),
++      explanations: [ev],
++      infrastructure: infra({ candidateIp: "198.51.100.1", asn: "AS999" }),
++    });
++
++    const recs = generateRecommendations(r, null);
++    const infraRec = recs.find((x) => x.action === "INVESTIGATE_SOURCE_INFRASTRUCTURE");
++    assert.ok(infraRec);
++    assert.ok(infraRec!.supportingEvidence.some((s) => s.includes("AS999")));
++  });
++
++  it("recommends INVESTIGATE_SOURCE_INFRASTRUCTURE when infrastructure status is INCONCLUSIVE", () => {
++    const r = record({
++      risk: risk({ score: 20, level: "low", classification: "legitimate" }),
++      infrastructure: infra({ status: "INCONCLUSIVE" }),
++    });
++
++    const recs = generateRecommendations(r, null);
++    assert.ok(recs.some((x) => x.action === "INVESTIGATE_SOURCE_INFRASTRUCTURE"));
++  });
++});
++
++describe("generateRecommendations — low-risk emails", () => {
++  it("returns no recommendations for a clean, fully-covered, low-risk email", () => {
++    const r = record({
++      risk: risk({ score: 5, level: "low", classification: "legitimate", evidenceCoverage: 1 }),
++    });
++
++    const recs = generateRecommendations(r, null);
++    assert.deepEqual(recs, []);
++  });
++
++  it("never recommends QUARANTINE_EMAIL or WARN_RECIPIENT for a low-risk email even with related emails present", () => {
++    const r = record({
++      risk: risk({ score: 5, level: "low", classification: "legitimate", evidenceCoverage: 1 }),
++    });
++
++    const recs = generateRecommendations(r, related());
++    const actions = recs.map((x) => x.action);
++    assert.ok(!actions.includes("QUARANTINE_EMAIL"));
++    assert.ok(!actions.includes("WARN_RECIPIENT"));
++  });
++});
++
++describe("generateRecommendations — missing evidence", () => {
++  it("recommends only COLLECT_ADDITIONAL_EVIDENCE when risk.score is null", () => {
++    const r = record({
++      risk: risk({
++        score: null,
++        level: null,
++        classification: "insufficient_evidence",
++        confidence: 0,
++        categoryScores: {
++          technical: categoryResult("UNAVAILABLE", null),
++          identity: categoryResult("UNAVAILABLE", null),
++          urlDomain: categoryResult("NOT_APPLICABLE", null),
++          content: categoryResult("AVAILABLE", 0),
++          infrastructure: categoryResult("UNAVAILABLE", null),
++        },
++        evidenceCoverage: 0.2,
++      }),
++    });
++
++    const recs = generateRecommendations(r, null);
++    assert.deepEqual(
++      recs.map((x) => x.action),
++      ["COLLECT_ADDITIONAL_EVIDENCE"]
++    );
++    assert.ok(recs[0].supportingEvidence.some((s) => s.includes("technical")));
++  });
++
++  it("recommends COLLECT_ADDITIONAL_EVIDENCE when risk itself is null", () => {
++    const r = record({ risk: null });
++    const recs = generateRecommendations(r, null);
++    assert.deepEqual(
++      recs.map((x) => x.action),
++      ["COLLECT_ADDITIONAL_EVIDENCE"]
++    );
++  });
++
++  it("adds a low-priority COLLECT_ADDITIONAL_EVIDENCE alongside other recommendations when coverage is partial", () => {
++    const r = record({
++      risk: risk({
++        score: 80,
++        level: "high",
++        classification: "phishing",
++        evidenceCoverage: 0.6,
++        categoryScores: {
++          technical: categoryResult("AVAILABLE", 80),
++          identity: categoryResult("AVAILABLE", 60),
++          urlDomain: categoryResult("AVAILABLE", 70),
++          content: categoryResult("UNAVAILABLE", null),
++          infrastructure: categoryResult("UNAVAILABLE", null),
++        },
++      }),
++    });
++
++    const recs = generateRecommendations(r, null);
++    assert.ok(recs.some((x) => x.action === "QUARANTINE_EMAIL"));
++    const collectRec = recs.find((x) => x.action === "COLLECT_ADDITIONAL_EVIDENCE");
++    assert.ok(collectRec);
++    assert.equal(collectRec!.priority, "low");
++  });
++});
++
++describe("generateRecommendations — data integrity", () => {
++  it("never fabricates supportingEvidence not present in the stored record", () => {
++    const ev: RiskEvidenceItem = {
++      type: "possible_lookalike_domain",
++      severity: "high",
++      weight: 35,
++      message: 'Domain "paypa1.com" closely resembles the trusted domain "paypal.com".',
++      evidence: {},
++      category: "urlDomain",
++      provenance: "DETERMINISTIC_ANALYSIS",
++    };
++    const r = record({
++      risk: risk({ score: 92, level: "critical", classification: "phishing" }),
++      explanations: [ev],
++    });
++
++    const recs = generateRecommendations(r, null);
++    for (const rec of recs) {
++      for (const supporting of rec.supportingEvidence) {
++        assert.equal(typeof supporting, "string");
++      }
++    }
++  });
++
++  it("never claims confirmed threat-actor attribution", () => {
++    const r = record({
++      risk: risk({ score: 92, level: "critical", classification: "phishing" }),
++    });
++    const recs = generateRecommendations(r, related());
++    for (const rec of recs) {
++      assert.ok(!rec.reason.toLowerCase().includes("confirmed threat actor"));
++    }
++  });
++
++  it("each recommendation has action, priority, reason, and supportingEvidence", () => {
++    const r = record({
++      risk: risk({ score: 92, level: "critical", classification: "phishing" }),
++      explanations: [
++        {
++          type: "possible_lookalike_domain",
++          severity: "high",
++          weight: 35,
++          message: "test",
++          evidence: {},
++          category: "urlDomain",
++          provenance: "DETERMINISTIC_ANALYSIS",
++        },
++      ],
++    });
++    const recs = generateRecommendations(r, related());
++    assert.ok(recs.length > 0);
++    for (const rec of recs) {
++      assert.ok(rec.action);
++      assert.ok(["low", "medium", "high", "critical"].includes(rec.priority));
++      assert.ok(rec.reason.length > 0);
++      assert.ok(Array.isArray(rec.supportingEvidence));
++    }
++  });
++});
+-- 
+2.43.0
+

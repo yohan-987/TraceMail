@@ -1,0 +1,301 @@
+Delivered-To: samarthbgt@gmail.com
+Received: by 2002:a05:7000:8812:b0:88c:d43:9187 with SMTP id du18csp3727225mab;
+        Tue, 18 Aug 2026 06:36:02 -0700 (PDT)
+X-Received: by 2002:a53:ac8d:0:b0:667:5e83:80ce with SMTP id 956f58d0204a3-66c72cbf552mr11323388d50.25.1787060162086;
+        Tue, 18 Aug 2026 06:36:02 -0700 (PDT)
+ARC-Seal: i=2; a=rsa-sha256; t=1787060162; cv=pass;
+        d=google.com; s=arc-20260327;
+        b=M0KsRgoEl/feUfL6bF4ISa/FJx8RGr/XHR89dBjxgb1PXmggbbH0I5pzTjJZfg/1Zz
+         +kaQZnMlrXxPpvJuaxnnvFsi+r/kS3k8c+LhdYERSt7jysGh2LfKKWozlt4EM82EYKtl
+         BUPs2G09l6SbwglT/6jqI7tRzNEooVgzyma3+smLcGr6hfTB3EOb14zRW3C1pxNI/A/8
+         VuggV4i/p1aFxcelAw4Qpm/BrP9QrAHczTU3FWlG6zEmNamEnnlEpTb5t6cZ0qKEJZOz
+         R0l8CawTjsy8D74DXPX7jsRdCo0oZvhyniBkPVbOVZicxPnJ1hotq2rwsPt7wgHNoEkN
+         7qmw==
+ARC-Message-Signature: i=2; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20260327;
+        h=to:subject:message-id:date:from:sender:mime-version:dkim-signature;
+        bh=5gM+eboYc9UbjT6LHQ3h9TW+IIwWtEWjMouMq2sbUvM=;
+        fh=OC9574+hqruAxcDF9npIRRIplr5wbw86ro3CkzPhtaA=;
+        b=mEqn31gWJGtN8p8b17TMvtKPBzynAZDoQ4DOt8ICIFIpgYOP8hsaNsixxp0bckk0hn
+         2wsCrgiVwFMfrkYRUz2ysk41AX1A8CgGOM5oQQqBPb2PXFHKvLngc6p3W+7KhgR/6YIZ
+         tjR/9KpEtB1+D8vUM6c9VhPHQUnqfEKdNjsnrHp6pf7Z8kYXPXAg7kyevklheZvhzjTp
+         Il3jfidCMzWCkmvPxcRTtK3Fyb4H+zAi8ugzs/QhJr/RhfUPxzl5AZ4x7VmvOe7ILcLG
+         89mofVD6pBwTw6HyFdkz4Y2BeqqysqrQDUzdnDVuTkHwwEo7fwSytw5n3w3pE8uryMLu
+         dUvA==;
+        dara=google.com
+ARC-Authentication-Results: i=2; mx.google.com;
+       dkim=pass header.i=@corizo-work.20251104.gappssmtp.com header.s=20251104 header.b=ORw4Husc;
+       arc=pass (i=1);
+       spf=pass (google.com: domain of abhishek@corizo.work designates 209.85.220.41 as permitted sender) smtp.mailfrom=abhishek@corizo.work;
+       dara=pass header.i=@gmail.com
+Return-Path: <abhishek@corizo.work>
+Received: from mail-sor-f41.google.com (mail-sor-f41.google.com. [209.85.220.41])
+        by mx.google.com with SMTPS id 00721157ae682-8406826415asor44061837b3.4.2026.08.18.06.36.01
+        for <samarthbgt@gmail.com>
+        (Google Transport Security);
+        Tue, 18 Aug 2026 06:36:02 -0700 (PDT)
+Received-SPF: pass (google.com: domain of abhishek@corizo.work designates 209.85.220.41 as permitted sender) client-ip=209.85.220.41;
+Authentication-Results: mx.google.com;
+       dkim=pass header.i=@corizo-work.20251104.gappssmtp.com header.s=20251104 header.b=ORw4Husc;
+       arc=pass (i=1);
+       spf=pass (google.com: domain of abhishek@corizo.work designates 209.85.220.41 as permitted sender) smtp.mailfrom=abhishek@corizo.work;
+       dara=pass header.i=@gmail.com
+ARC-Seal: i=1; a=rsa-sha256; t=1787060161; cv=none;
+        d=google.com; s=arc-20260327;
+        b=mRoLU4aDK+vID50bqIN4BNKlQuPlZY3sAq/GZDwtj6OhOb1HPXRL5DGdchjuiuOvrc
+         ILRLx4qqWr8vpjIPqoPmoBNQVYxCtvTFZLacKmd5zDlfFYWxdrCOxdn41uL49P/pTau9
+         cvSl6ooZJ+dDESLvXZSJ5dSq9CY8hnj4FOU79ZhSl93jhtJKZMhG7SClxvlAtkRQpmfV
+         IpBWk6OSh0THON5PMbjG4CACJZDLlv7x9Ac2GLTHAZlTDhCAo11lSpQcLLEQSNvDGKX/
+         1UDkber3yqE6YyREe0gzN0uja8CgdmCmJFGkWISdRg8W/YfX6ZV0ocAeCy6jAn5JFai8
+         M85w==
+ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20260327;
+        h=to:subject:message-id:date:from:sender:mime-version:dkim-signature;
+        bh=5gM+eboYc9UbjT6LHQ3h9TW+IIwWtEWjMouMq2sbUvM=;
+        fh=OC9574+hqruAxcDF9npIRRIplr5wbw86ro3CkzPhtaA=;
+        b=X9Sn0PkyiOTRa3BPdxYtv2Nea4VSmnBRN+BKjUtPSQunqs1ymHpE77glTFTVGTpQ1O
+         kFA8yIon56qYbSE33nP8wJnY2CxQtUfOcoYSGTQONnvxNkRWtSrZJ3i6/axprCG0xcQ9
+         b8LRm1k+pzNhxm0BGbGMiZsZtRJbnfN+bXzJh8XKDMuso/3mPhLh62z//+EVrd58cK4y
+         5Jl8jpTwtaU5L2HgVhmz6o0Cv9rWgoh8D3GysSAFH1VR7FhYKYjaSM7GIkdme24Oc4x9
+         fCiT854YFIFnmAZNBSYCrEBwk3myh5essL8iPBIHoof/bxtEZmrq4/9Ubv7DhJKUjS1F
+         5orw==;
+        dara=google.com
+ARC-Authentication-Results: i=1; mx.google.com; arc=none
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+        d=corizo-work.20251104.gappssmtp.com; s=20251104; t=1787060161; x=1787664961; dara=google.com;
+        h=content-type:to:subject:message-id:date:from:sender:mime-version
+         :from:to:cc:subject:date:message-id:reply-to:content-type;
+        bh=5gM+eboYc9UbjT6LHQ3h9TW+IIwWtEWjMouMq2sbUvM=;
+        b=ORw4HuscnzxOpiqjjJlSYNNQ10WCBhv8Duo56d1i8CipbUQxAIkX0WXoJ0X6MWTwkU
+         EdoGA6vGUizlG4sV1h1siQ3S7ubQL0xp3KjZ1WDcUupT/uHNv9xFQwHQKyMtg0FQf+yK
+         yi5tWzMpU4EmNhuSZ18Ov/itIMXMjDD2gFZ4aSL/Rl/oOy126tv5e8ZJgQmVenPrkd1I
+         CBSMD8+YUtWQ9Y9n7KP5uh22+P5Z6j25oah4eC7kuezo722aXow09u5J0os8V3qIlhQ5
+         mfEqfSMu+EEYs5GQlKsOgHTPEsyo/zMM3Zow8YoQWxVioqaSxlWshHg4bQTasdTz004I
+         12VA==
+X-Google-DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+        d=1e100.net; s=20251104; t=1787060161; x=1787664961;
+        h=content-type:to:subject:message-id:date:from:sender:mime-version
+         :x-gm-gg:x-gm-message-state:from:to:cc:subject:date:message-id
+         :reply-to:content-type;
+        bh=5gM+eboYc9UbjT6LHQ3h9TW+IIwWtEWjMouMq2sbUvM=;
+        b=H/+UvjgLYVMAG9Z9Ui7sRRKrzgRcO4TCwHNeaKolZvLW5QICZFhkPiwlR9IOgHfmjk
+         2+QPIba+VyLZt/uvnD+VX18wmRIMm2BX1ri8yHGqYbUqdwPPlsqsO6pXkag7hbeKfGlh
+         d3MMqbEoL8PwwnAwMx6LBC3sIJ8I35nqXaWRbIc0QEMZ2xVNDuiSO1pDk5zDXjOjLqso
+         Q45kncmuT2j0ic+2GjAZxRS0GsrOCaVq5dwfNrSn5JaP0lx+Pn+gKFzkdct15xR1Bj6H
+         ouK+IgILx5hn/bvPJ+1I5XMoX3XxYaWssV0fNT+AawCYtGCqjmCWKcWuKn2+LYZ+2OhC
+         hilQ==
+X-Gm-Message-State: AOJu0YxAN7+ySSR+r/RlVO3tzC8sOTnG/QbThwbl2m8npkEfklmHDVr6
+	UGO0RqQNJt8oYdJHB6D6pLsg8ohnlvGlser7i4xShHWRndu0bAB/F8qiW28WC6KXJZzKEcfgZ+G
+	nkO+GJzG+M03CfQCjDFdFFF/r47cTc6Fo/6b6N0WVMyrbqchu74NM
+X-Gm-Gg: AR+sD13X1vjOq+CS7iKdvnPEQje+AR3byty3Oc/Kgf2VSobJvGyOzycOq/9RDkPTrT/
+	N51nRY9a8FaNlM239ISwJDbeIaiai+bQTRwPKibZtFoOqslmbAIGZerDSFh4GSmw7uT38SdhYc+
+	ws8MsK5Ab7X5TlmyYDJoTc/jqWbO6oJ4r5EMl7eLHtl2qiYyf4QqAp2kmG2RsYYo8L+gUgB6/3t
+	lUU5wEl3pYrS5qZ1ZWjTJAtG0HQH2KHAgdj23HqXYKhTYizSCtzv/0KM4APRk6bLLQrigjvXRWp
+	CrMQ23pY/UrA2sl7F93nV//izmO8Sg4uiDSPNER7hbSlbcIbzeuPmA6xIu+19S5vSshERSxKiWT
+	W
+X-Received: by 2002:a53:ced0:0:b0:667:bc49:373d with SMTP id
+ 956f58d0204a3-66c72cbf547mr8393651d50.33.1787060161465; Tue, 18 Aug 2026
+ 06:36:01 -0700 (PDT)
+Received: from 877638084982 named unknown by gmailapi.google.com with
+ HTTPREST; Tue, 18 Aug 2026 06:36:00 -0700
+Received: from 877638084982 named unknown by gmailapi.google.com with
+ HTTPREST; Tue, 18 Aug 2026 06:36:00 -0700
+MIME-Version: 1.0
+Sender: abhishek@corizo.work
+From: abhishek@corizo.work
+Date: Tue, 18 Aug 2026 06:36:00 -0700
+X-Google-Sender-Auth: q8QRbGsfMKtZnkRrGIMdgM4oncY
+X-Gm-Features: AcwNN1WXJifT1hWk3LGjzUmr-GNqizjfT_DPZCBFp94jaP-hg2gjgVXHxHYqHnA
+Message-ID: <CAK_Me2B1x-Gu+sw_mhsoMzSvFhHnbHjpUno25V+QndQ2Z6tV-g@mail.gmail.com>
+Subject: COLLEGE Students: Internship Slots Closing Soon
+To: samarthbgt@gmail.com
+Content-Type: multipart/alternative; boundary="0000000000001ddc5d0659525ecf"
+
+--0000000000001ddc5d0659525ecf
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: quoted-printable
+
+Dear SAMARTH MISHRA,
+
+I hope you=E2=80=99re doing well.
+
+I=E2=80=99m reaching out to share a *time-sensitive internship opportunity*=
+ for
+students from COLLEGE who are looking to gain practical experience before
+the upcoming placement season.
+
+At Corizo, we are  known for providing paid training and internships design=
+ed
+to enhance students' professional skills. Corizo has officially
+collaborated with multiple MNCs, making this a valuable and credible
+experience for students
+
+For this cycle, we have opened a *limited number of internship slots
+specifically for COLLEGE students*, and the registrations are currently in
+the final phase.
+Internship Overview
+ROLE : CAMPUS AMBASSADOR
+
+   - *Mode:* Work From Home
+   - *Duration:* 1 Month
+   - *Stipend:* Performance-based (Up to =E2=82=B925,000)
+   - *Working Hours:* Flexible
+
+What You=E2=80=99ll Get
+
+   - Internship Certificate & Offer Letter
+   - Hands-on project exposure
+   - Resume-building support
+   - Practical work experience
+
+*If this aligns with your current goals, you can apply using the link
+below:*
+*https://forms.gle/vd2MjAWdx8TrdsGe6 <https://forms.gle/vd2MjAWdx8TrdsGe6>*
+
+*Note:* This opportunity is only for currently enrolled students of COLLEGE
+.
+
+Since the remaining slots are limited, we recommend applying at the
+earliest. Once the capacity is filled, registrations will be closed without
+further notice.
+
+If you have any questions, feel free to reply to this email.
+
+Best regards,
+
+
+
+
+--
+Abhishek Gour
+*TEAM LEAD MANAGER*
+*Corizo Edu tech *
+
+Abhishek Gour
+
+TEAM LEAD MANAGER
+
+
+
+
+
+
+
++91 9667479911
+ abhishek.gour@corizo.in
+https://corizo.in/ <https://www.corizo.in/>
+\\
+
+Plot no 112, Udyog Vihar phase 1, G S Tower, Gurgaon.
+
+--0000000000001ddc5d0659525ecf
+Content-Type: text/html; charset="UTF-8"
+Content-Transfer-Encoding: quoted-printable
+
+<div dir=3D"ltr"><div dir=3D"ltr"><div dir=3D"ltr"><div dir=3D"ltr"><p>Dear=
+ SAMARTH MISHRA,</p><p>I hope you=E2=80=99re doing well.</p><p>I=E2=80=99m =
+reaching out to share a=C2=A0<strong>time-sensitive internship opportunity<=
+/strong>=C2=A0for students from COLLEGE  who are looking to gain practical =
+experience before the upcoming placement season.</p><p>At Corizo,=C2=A0<spa=
+n style=3D"background-color:rgb(243,243,243)">we are</span><span style=3D"b=
+ackground-color:rgba(231,242,255,0.99)">=C2=A0</span>=C2=A0known for provid=
+ing=C2=A0<span style=3D"font-weight:bolder">paid training and internships</=
+span>=C2=A0designed to enhance students&#39; professional skills. Corizo ha=
+s officially collaborated with multiple=C2=A0<span style=3D"font-weight:bol=
+der">MNCs</span>, making this a valuable and credible experience for studen=
+ts</p><p>For this cycle, we have opened a=C2=A0<strong>limited number of in=
+ternship slots specifically for COLLEGE  students</strong>, and the registr=
+ations are currently in the final phase.</p><h3><span style=3D"background-c=
+olor:rgb(207,226,243)">Internship Overview<br>ROLE : CAMPUS AMBASSADOR=C2=
+=A0</span></h3><ul><li><strong>Mode:</strong>=C2=A0Work From Home</li><li><=
+strong>Duration:</strong>=C2=A01 Month</li><li><strong>Stipend:</strong>=C2=
+=A0Performance-based (Up to =E2=82=B925,000)</li><li><strong>Working Hours:=
+</strong>=C2=A0Flexible</li></ul><h3>What You=E2=80=99ll Get</h3><ul><li>In=
+ternship Certificate &amp; Offer Letter</li><li>Hands-on project exposure</=
+li><li>Resume-building support</li><li>Practical work experience</li></ul><=
+p><b style=3D"background-color:rgb(255,255,0)">If this aligns with your cur=
+rent goals, you can apply using the link below:</b><br><b><a href=3D"https:=
+//forms.gle/vd2MjAWdx8TrdsGe6" style=3D"background-color:rgb(255,255,0)"><f=
+ont size=3D"4">https://forms.gle/vd2MjAWdx8TrdsGe6</font></a></b></p><p><st=
+rong>Note:</strong>=C2=A0This opportunity is only for currently enrolled st=
+udents of COLLEGE .</p><p>Since the remaining slots are limited, we recomme=
+nd applying at the earliest. Once the capacity is filled, registrations wil=
+l be closed without further notice.</p><p>If you have any questions, feel f=
+ree to reply to this email.</p><p>Best regards,<br><br></p><p><br></p><div>=
+<br clear=3D"all"></div><div><br></div><p><span class=3D"gmail_signature_pr=
+efix">--</span><br></p><div dir=3D"ltr" class=3D"gmail_signature"><div dir=
+=3D"ltr"><div style=3D"font-family:docs-roboto;font-size:14.6667px;word-spa=
+cing:1px"><h3 color=3D"#000000" style=3D"font-family:Arial;margin:0px;color=
+:rgb(0,0,0)"><font size=3D"2" face=3D"verdana, sans-serif">Abhishek Gour</f=
+ont></h3></div><div dir=3D"ltr" style=3D"font-size:14.6667px;word-spacing:1=
+px"><div><font color=3D"#000000" face=3D"verdana, sans-serif"><b>TEAM LEAD =
+MANAGER</b></font></div><font color=3D"#ffffff" style=3D"font-family:docs-r=
+oboto;background-color:rgb(103,78,167)"><b>Corizo Edu tech=C2=A0</b><br></f=
+ont><div style=3D"font-family:docs-roboto"><table cellpadding=3D"0" cellspa=
+cing=3D"0" style=3D"color:rgb(255,255,255);vertical-align:-webkit-baseline-=
+middle;font-family:Arial"><tbody><tr><td><table cellpadding=3D"0" cellspaci=
+ng=3D"0" style=3D"vertical-align:-webkit-baseline-middle"><tbody><tr><td wi=
+dth=3D"150" style=3D"vertical-align:middle"><span style=3D"display:block;ma=
+rgin-left:20px"><font face=3D"verdana, sans-serif"><img width=3D"96" src=3D=
+"https://ci3.googleusercontent.com/mail-sig/AIorK4xkFvvhT37NqWAXqMacgd7e0Xn=
+e7aKbjE2VwSEnJE8DiaOJvJ8_wYFvFQ3YMlSSFrXoV2uJlrw" height=3D"96" style=3D"ma=
+x-width:130px"></font></span></td><td style=3D"vertical-align:middle"><h3 c=
+olor=3D"#000000" style=3D"margin:0px;color:rgb(0,0,0)"><font size=3D"2" fac=
+e=3D"verdana, sans-serif" style=3D"font-weight:normal"><br></font></h3><h3 =
+color=3D"#000000" style=3D"margin:0px;color:rgb(0,0,0)"><font size=3D"2" fa=
+ce=3D"verdana, sans-serif">Abhishek Gour</font></h3><div><font face=3D"verd=
+ana, sans-serif"><br></font></div><h3 color=3D"#000000" style=3D"margin:0px=
+;color:rgb(0,0,0)"><font face=3D"verdana, sans-serif"><span style=3D"font-s=
+ize:14.6667px">TEAM LEAD MANAGER</span></font></h3><p color=3D"#000000" sty=
+le=3D"margin:0px;color:rgb(0,0,0);line-height:22px"><font face=3D"verdana, =
+sans-serif"><br><br><br><br><br><br></font></p></td><td width=3D"30"><div s=
+tyle=3D"width:30px"></div></td><td color=3D"#492fc0" width=3D"1" style=3D"w=
+idth:1px;border-bottom:none;border-left:1px solid rgb(73,47,192)"></td><td =
+width=3D"30"><div style=3D"width:30px"></div></td><td style=3D"vertical-ali=
+gn:middle"><table cellpadding=3D"0" cellspacing=3D"0" style=3D"vertical-ali=
+gn:-webkit-baseline-middle"><tbody><tr height=3D"25" style=3D"vertical-alig=
+n:middle"><td width=3D"30" style=3D"vertical-align:middle"><table cellpaddi=
+ng=3D"0" cellspacing=3D"0" style=3D"vertical-align:-webkit-baseline-middle"=
+><tbody><tr><td style=3D"vertical-align:bottom"><span color=3D"#492fc0" wid=
+th=3D"11" style=3D"display:block;background-color:rgb(73,47,192)"><img src=
+=3D"https://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/icons=
+/phone-icon-2x.png" color=3D"#492fc0" width=3D"13" style=3D"display:block">=
+</span></td></tr></tbody></table></td><td style=3D"padding:0px;color:rgb(0,=
+0,0)">+91 9667479911</td></tr><tr height=3D"25" style=3D"vertical-align:mid=
+dle"><td width=3D"30" style=3D"vertical-align:middle"><table cellpadding=3D=
+"0" cellspacing=3D"0" style=3D"vertical-align:-webkit-baseline-middle"><tbo=
+dy><tr><td style=3D"vertical-align:bottom"><span color=3D"#492fc0" width=3D=
+"11" style=3D"display:block;background-color:rgb(73,47,192)"><img src=3D"ht=
+tps://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/icons/email=
+-icon-2x.png" color=3D"#492fc0" width=3D"13" style=3D"display:block"></span=
+></td></tr></tbody></table></td><td style=3D"padding:0px"><font face=3D"ver=
+dana, sans-serif"><font color=3D"#000000">=C2=A0</font><a href=3D"mailto:ab=
+hishek.gour@corizo.in" target=3D"_blank"><font color=3D"#0000ff">abhishek.g=
+our@corizo.in</font></a></font></td></tr><tr height=3D"25" style=3D"vertica=
+l-align:middle"><td width=3D"30" style=3D"vertical-align:middle"><table cel=
+lpadding=3D"0" cellspacing=3D"0" style=3D"vertical-align:-webkit-baseline-m=
+iddle"><tbody><tr><td style=3D"vertical-align:bottom"><span color=3D"#492fc=
+0" width=3D"11" style=3D"display:block;background-color:rgb(73,47,192)"><im=
+g src=3D"https://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/=
+icons/link-icon-2x.png" color=3D"#492fc0" width=3D"13" style=3D"display:blo=
+ck"></span></td></tr></tbody></table></td><td style=3D"padding:0px"><a href=
+=3D"https://www.corizo.in/" color=3D"#000000" style=3D"padding-left:3px;pad=
+ding-right:3px;padding-bottom:3px" target=3D"_blank"><font color=3D"#0000ff=
+" face=3D"verdana, sans-serif">https://corizo.in/</font></a></td></tr><tr h=
+eight=3D"25" style=3D"vertical-align:middle"><td width=3D"30" style=3D"vert=
+ical-align:middle"><font face=3D"verdana, sans-serif">\\</font><table cellp=
+adding=3D"0" cellspacing=3D"0" style=3D"vertical-align:-webkit-baseline-mid=
+dle"><tbody><tr><td style=3D"vertical-align:bottom"><span color=3D"#492fc0"=
+ width=3D"11" style=3D"display:block;background-color:rgb(73,47,192)"><img =
+src=3D"https://cdn2.hubspot.net/hubfs/53/tools/email-signature-generator/ic=
+ons/address-icon-2x.png" color=3D"#492fc0" width=3D"13" style=3D"display:bl=
+ock"></span></td></tr></tbody></table></td><td style=3D"padding:0px"><div l=
+ang=3D"en-IN" style=3D"clear:none;padding-left:15px;padding-right:15px"><di=
+v style=3D"font-size:small;word-spacing:0px;margin-top:7px"></div><div styl=
+e=3D"font-size:small;word-spacing:0px;margin-top:7px"><span style=3D"color:=
+rgb(0,0,0)">Plot no 112, Udyog Vihar phase 1, G S Tower, Gurgaon.<br></span=
+></div></div></td></tr></tbody></table></td></tr></tbody></table></td></tr>=
+</tbody></table></div></div></div></div></div>
+</div>
+</div>
+</div>
+
+--0000000000001ddc5d0659525ecf--

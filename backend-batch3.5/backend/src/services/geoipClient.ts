@@ -6,6 +6,8 @@ export interface GeoIpLookupResult {
   country: string | null;
   region: string | null;
   city: string | null;
+  latitude: number | null;
+  longitude: number | null;
   isp: string | null;
   asn: string | null;
   organization: string | null;
@@ -23,6 +25,8 @@ function empty(ip: string, status: EvidenceAvailability): GeoIpLookupResult {
     country: null,
     region: null,
     city: null,
+    latitude: null,
+    longitude: null,
     isp: null,
     asn: null,
     organization: null,
@@ -70,6 +74,10 @@ export function createIpApiProvider(options: {
         const country = asString(obj.country);
         const region = asString(obj.regionName) ?? asString(obj.region);
         const city = asString(obj.city);
+        const latitude =
+          typeof obj.lat === "number" && Number.isFinite(obj.lat) ? obj.lat : null;
+        const longitude =
+          typeof obj.lon === "number" && Number.isFinite(obj.lon) ? obj.lon : null;
         const isp = asString(obj.isp);
         const organization = asString(obj.org);
         const asn = asString(obj.as) ?? asString(obj.asn);
@@ -86,6 +94,8 @@ export function createIpApiProvider(options: {
           country,
           region,
           city,
+          latitude,
+          longitude,
           isp,
           asn,
           organization,

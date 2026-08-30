@@ -149,6 +149,8 @@ export async function analyzeInfrastructure(options: {
       country: lookup.country,
       region: lookup.region,
       city: lookup.city,
+      latitude: lookup.latitude,
+      longitude: lookup.longitude,
       isp: lookup.isp,
       asn: lookup.asn,
       organization: lookup.organization,

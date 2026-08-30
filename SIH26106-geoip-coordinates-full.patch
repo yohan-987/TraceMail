@@ -1,0 +1,91 @@
+diff --git a/backend-batch3.5/backend/src/schemas/types.ts b/backend-batch3.5/backend/src/schemas/types.ts
+--- a/backend-batch3.5/backend/src/schemas/types.ts
++++ b/backend-batch3.5/backend/src/schemas/types.ts
+@@ -253,9 +253,11 @@ export interface GeoIpRecord {
+   country: string | null;
+   region: string | null;
+   city: string | null;
++  latitude: number | null;
++  longitude: number | null;
+   isp: string | null;
+   asn: string | null;
+   organization: string | null;
+   hosting: string | null;
+   status: EvidenceAvailability;
+ }
+diff --git a/backend-batch3.5/backend/src/services/geoipClient.ts b/backend-batch3.5/backend/src/services/geoipClient.ts
+--- a/backend-batch3.5/backend/src/services/geoipClient.ts
++++ b/backend-batch3.5/backend/src/services/geoipClient.ts
+@@ -5,9 +5,11 @@ export interface GeoIpLookupResult {
+   country: string | null;
+   region: string | null;
+   city: string | null;
++  latitude: number | null;
++  longitude: number | null;
+   isp: string | null;
+   asn: string | null;
+   organization: string | null;
+   hosting: string | null;
+   status: EvidenceAvailability;
+ }
+@@ -24,10 +26,12 @@ function empty(ip: string, status: EvidenceAvailability): GeoIpLookupResult {
+     ip,
+     country: null,
+     region: null,
+     city: null,
++    latitude: null,
++    longitude: null,
+     isp: null,
+     asn: null,
+     organization: null,
+     hosting: null,
+     status,
+   };
+@@ -66,4 +70,8 @@ export function createIpApiProvider(options: {
+         const country = asString(obj.country);
+         const region = asString(obj.regionName) ?? asString(obj.region);
+         const city = asString(obj.city);
++        const latitude =
++          typeof obj.lat === "number" && Number.isFinite(obj.lat) ? obj.lat : null;
++        const longitude =
++          typeof obj.lon === "number" && Number.isFinite(obj.lon) ? obj.lon : null;
+         const isp = asString(obj.isp);
+@@ -79,9 +85,11 @@ export function createIpApiProvider(options: {
+         return {
+           ip,
+           country,
+           region,
+           city,
++          latitude,
++          longitude,
+           isp,
+           asn,
+           organization,
+           hosting,
+diff --git a/backend-batch3.5/backend/src/analyzers/infrastructure.ts b/backend-batch3.5/backend/src/analyzers/infrastructure.ts
+--- a/backend-batch3.5/backend/src/analyzers/infrastructure.ts
++++ b/backend-batch3.5/backend/src/analyzers/infrastructure.ts
+@@ -148,7 +148,9 @@ export async function analyzeInfrastructure(options: {
+       country: lookup.country,
+       region: lookup.region,
+       city: lookup.city,
++      latitude: lookup.latitude,
++      longitude: lookup.longitude,
+       isp: lookup.isp,
+       asn: lookup.asn,
+       organization: lookup.organization,
+       hosting: lookup.hosting,
+diff --git a/FRONTEND/src/pages/InfrastructurePage.tsx b/FRONTEND/src/pages/InfrastructurePage.tsx
+--- a/FRONTEND/src/pages/InfrastructurePage.tsx
++++ b/FRONTEND/src/pages/InfrastructurePage.tsx
+@@ -100,8 +100,8 @@ function buildGeoData(activeEmailData: any) {
+       ip: ipObj.ip,
+       country: ipObj.country || 'Unknown',
+       region: ipObj.region || 'Unknown',
+       city: ipObj.city || 'Unknown',
+-      lat: ipObj.lat || 0,
+-      lon: ipObj.lon || 0,
++      lat: ipObj.latitude ?? 0,
++      lon: ipObj.longitude ?? 0,
+       flag: ipObj.country?.substring(0, 2)?.toUpperCase() || '??',
+       isp: ipObj.isp || 'Unknown',

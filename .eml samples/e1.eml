@@ -1,0 +1,114 @@
+Delivered-To: samarthbgt@gmail.com
+Received: by 2002:a05:7000:c88f:b0:891:1934:a24 with SMTP id ma15csp3162866mab;
+        Thu, 27 Aug 2026 01:22:57 -0700 (PDT)
+X-Forwarded-Encrypted: i=2; AHgh+RqUCok80VkmdUjIq/Le6Vveqm9i83fOn4hkHP/lANjGdBjABIY/1zuHrp9ly5wCfxFUHufzjbczpgzN@gmail.com
+X-Received: by 2002:a05:6820:a293:20b0:6a3:7424:8db5 with SMTP id 006d021491bc7-6b1b004a564mr3050217eaf.3.1787818977533;
+        Thu, 27 Aug 2026 01:22:57 -0700 (PDT)
+ARC-Seal: i=1; a=rsa-sha256; t=1787818977; cv=none;
+        d=google.com; s=arc-20260327;
+        b=CclFb9ncEIj0uTKgtVEKZ8zPi9zwkI8xxs537P9K767OXNTIsv5/LP5/PiIQ1IQZuD
+         /uQ/HtYrXDKlC69Lc1gsCXa254yvCc8RQxHnEFKxCVHZBKb6PYyWeUvXAa4CsYeBHXf/
+         2PbObxcZGKjj2sPkeYYfDJFGzDroYZO+AH5Hxuo6dNQwvdiZNh/++4yuPvALy8MrpnyY
+         RP+7ZMSG3H2HByD6MrK75n40Vr8LmeC6bRu2cKWc09jrwZze2/yBS4REyreLRmDs/fgT
+         VyDnQZPgEY7THljrP3SawdtmcGpxT3wziDO3Mu/jBtLNh8owY1RRFhqRUNKLEzwj+mov
+         z4rQ==
+ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20260327;
+        h=reply-to:date:from:to:subject:content-description
+         :content-transfer-encoding:mime-version:ironport-hdrordr
+         :ironport-data:ironport-sdr:message-id;
+        bh=IdR/Z1BNCuMIvruSN4iDcr53z6z3xtdX9HD99PK4E+0=;
+        fh=zcMHJxbQYF32nttSwogTbSBpHyEBpAZXbELIyKitPWI=;
+        b=gqQUhd2b1jhZPYSJ56uh1WJqsGm4UAP1rymc5PAfz7L4j7J5JcN7jecpBOrJdQut/3
+         UGTMDapxSHTkhIecYt7h1RipSwHTXH+m9WLnl9+xDCSen3YoWDiv+Uu/eBkHB9AHyPxf
+         A8PEwHgbXEn99c5wtWUi9YgXDACACfoliMBGdwja0sfgztRaLkfmHPZsLExI/Vnzh3VN
+         bcst/T9W07JiO+oHSoHfQi8bfwcTQ/17Gv8tYWh6chjwO55sQ+e0yDNQnFmUPjLKRP1e
+         lIS6blrt4AMY//v1O3a8jQU890hCBNw580zteYY+exMTFL6+thr5QxzghuoYNSmkktw6
+         J4oQ==;
+        dara=google.com
+ARC-Authentication-Results: i=1; mx.google.com;
+       spf=pass (google.com: domain of service_tw@whirlpool.com designates 158.52.183.20 as permitted sender) smtp.mailfrom=service_tw@whirlpool.com;
+       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=whirlpool.com
+Return-Path: <service_tw@whirlpool.com>
+Received: from mailhost.whirlpool.com (wmail6.whirlpool.com. [158.52.183.20])
+        by mx.google.com with ESMTPS id 006d021491bc7-6b1a24aeeebsi6415737eaf.8.2026.08.27.01.22.20
+        (version=TLS1_2 cipher=ECDHE-ECDSA-AES128-GCM-SHA256 bits=128/128);
+        Thu, 27 Aug 2026 01:22:57 -0700 (PDT)
+Received-SPF: pass (google.com: domain of service_tw@whirlpool.com designates 158.52.183.20 as permitted sender) client-ip=158.52.183.20;
+Authentication-Results: mx.google.com;
+       spf=pass (google.com: domain of service_tw@whirlpool.com designates 158.52.183.20 as permitted sender) smtp.mailfrom=service_tw@whirlpool.com;
+       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=whirlpool.com
+Message-ID: <6a8ff3e1.1a5acf1f.24545b.cf64SMTPIN_ADDED_MISSING@mx.google.com>
+IronPort-SDR: kJJuCTW1SiZu1vgtaXE1XVPM9Lkla75Fp7x1l+rfFDWj4Z1c4gZ2xu3pmOR80RJqSouLOE36Bu
+ fLLwWb0YFw2Q==
+X-ExtLoop1: 1
+IronPort-Data: A9a23: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
+ 9eQACdoSeMoZg==
+IronPort-HdrOrdr: A9a23:mPIIPaB+nTVK3QzlHem255DYdb4zR+YMi2TCHihKJSC9Ffb0qy
+ nOpp8mPHDP6Ar5NEtApTniAsO9qBrnnPZICO8qTNSftWLd11dAQrsN0bff
+X-IronPort-AV: E=Sophos;i="6.18,319,1751256000"; 
+   d="scan'208";a="974480409"
+Received: from 84.67.168.103.in-addr.arpa.digivps.com (HELO [103.168.67.84]) ([103.168.67.84])
+  by mailhost.whirlpool.com with ESMTP; 27 Aug 2026 04:20:50 -0400
+Content-Type: text/plain; charset="iso-8859-1"
+MIME-Version: 1.0
+Content-Transfer-Encoding: quoted-printable
+Content-Description: Mail message body
+Subject: Hi Dear
+To: Recipients <service_tw@whirlpool.com>
+From: "Peter Chen" <service_tw@whirlpool.com>
+Date: Thu, 27 Aug 2026 01:20:03 -0700
+Reply-To: peterchen000012@gmail.com
+
+This is to inform you of a very important piece of information which will b=
+e of great help to redeem you from all the difficulties you have been exper=
+iencing in getting your long overdue payment.
+
+I am a highly placed official of the International Monetary Fund (IMF). It =
+may interest you to know that reports have reached our office by so many co=
+rrespondences on the uneasy way in which people like you are treated by Var=
+ious Banks and payment officials across Europe, Africa, Asia and the USA. W=
+e have decided to put a stop to that. All Governmental and Non-Governmental=
+ Organizations, NGOs, Finance Companies, Banks, Security Companies and Cour=
+ier companies which have been in contact with you of late have been instruc=
+ted to back off from your transaction and you have been advised NOT to resp=
+ond to them anymore since the International Monetary Fund (IMF) is now dire=
+ctly in charge of your payment.
+
+You are in our payment schedule list of beneficiaries that will receive the=
+ir funds in this SECOND quarter payment for the year 2026. Your payment fun=
+d is USD$18.3Million, this also includes the generated interest so far.
+
+Kindly get back to me for more detailed information.
+
+Mrs. Debra Andrews
+Debt recovery department

@@ -1,0 +1,1406 @@
+From f3a9e3199dfba4c8c9880c8025d4aeda08bb8c22 Mon Sep 17 00:00:00 2001
+From: Yohan <you@example.com>
+Date: Sun, 30 Aug 2026 13:27:03 +0000
+Subject: [PATCH] Batch 7: security hardening, TS modernization, real
+ report/correlation data
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Re-read the actual current HEAD before editing. Most of Batch 7's audit
+sections were already correctly implemented (see report below) — this
+commit contains only the genuine gaps found.
+
+BACKEND SECURITY/RELIABILITY FIXES
+
+1. tsconfig.json: module/moduleResolution changed from CommonJS/node to
+   Node16/node16 — the correct modern pairing for a Node.js CommonJS
+   backend, replacing the deprecated node10-style resolution. Verified
+   with zero source changes required: npm run build, npm test (all
+   passing), npm run dev, and the compiled dist/server.js all work
+   identically.
+
+2. src/routes/emails.ts: added a shared emailId route-param validator
+   (router.param) rejecting anything that isn't [A-Za-z0-9-]{1,100}
+   with a clean 400 INVALID_EMAIL_ID, applied to every :emailId route
+   at once. Filesystem paths were already traversal-safe via
+   emailStore.ts's existing safeId() character stripping — this adds
+   proper input validation on top, so a malformed ID fails cleanly
+   instead of being silently mangled into an unrelated lookup that
+   404s, and keeps raw malformed input out of error messages.
+
+3. src/services/emailStore.ts: getEmailRecord()/readSummary() now
+   catch a JSON.parse failure on a corrupted/truncated stored record
+   and convert it to a controlled 500 RECORD_UNREADABLE ApiError,
+   instead of letting the raw SyntaxError bubble up and get mapped to
+   a misleading 400 BAD_REQUEST by the generic error handler.
+
+4. src/app.ts:
+   - Hardened the generic `Error` branch: previously echoed
+     err.message verbatim to the client for ANY unclassified Error —
+     a latent internal-detail leak vector (e.g. a future uncaught
+     parser error). Now logs server-side and returns a generic safe
+     message; the one legitimate caller that relied on the old
+     behavior (upload.ts's .eml-only file filter) was converted to
+     throw the app's own ApiError instead, so it's unaffected and
+     reaches the client through the same controlled path as every
+     other validation error.
+   - Oversized uploads now return 413 Payload Too Large (was 400) —
+     matches the spec's explicit requirement; other multer errors
+     (wrong field, too many files) stay 400.
+   - Added app.disable("x-powered-by") and two zero-dependency safe
+     headers (X-Content-Type-Options: nosniff, X-Frame-Options: DENY).
+
+5. src/utils/upload.ts: default MAX_UPLOAD_BYTES raised from 5MB to
+   ~25MB per spec (real .eml files with attachments commonly exceed
+   5MB); fileFilter now throws Errors.invalidFileType() instead of a
+   plain Error (see #4).
+
+6. src/utils/apiError.ts: added invalidEmailId(), invalidFileType(),
+   recordUnreadable() error constructors, following the existing
+   Errors.* convention.
+
+7. src/analyzers/reportBuilder.ts: the "Received Relay Chain" report
+   section only exposed a receivedHopCount — added the actual per-hop
+   receivedChain array (hop/fromHostname/fromIp/byHostname/
+   timestampIso), reusing headerAnalysis's already-computed data
+   (OBSERVED provenance, never re-derived), so the frontend report can
+   render real relay-chain detail instead of just a count.
+
+CONFIRMED ALREADY CORRECT (audited, no changes needed):
+  - List-query param validation (pagination/sort/filter/status/
+    classification) — already comprehensive with proper error codes.
+  - Filename safety (assertSafeFilename) — already traversal-proof.
+  - No exec/spawn/eval anywhere in the codebase.
+  - No SSRF risk — nothing fetches attacker-controlled URLs extracted
+    from emails; GeoIP/DNS only ever hit their own configured provider
+    endpoints (checked geoipClient.ts, dnsClient.ts, urlAnalyzer.ts,
+    domainAnalyzer.ts, iocExtractor.ts directly).
+  - GeoIP/DNS timeout and failure handling already tested.
+  - ML cache behavior (a failed model load stays failed until restart)
+    is correct per spec ("configuration changes require restart as
+    expected"), not a bug — left unchanged.
+  - No secrets logged anywhere (verified across llmClient.ts,
+    aiAssessment.ts, and the existing [ai-debug] diagnostics).
+
+FRONTEND — REAL DATA INTEGRATION (Sections 19-24)
+
+8. FRONTEND/src/api/api.ts: added getEmailReport() (GET
+   /api/v1/emails/:emailId/report) with a full ApiForensicReport type
+   matching the backend's ForensicReportContent exactly, and
+   getRelatedEmails() (GET /api/v1/emails/:emailId/related) with an
+   ApiRelatedEmails type.
+
+9. FRONTEND/src/pages/ReportsPage.tsx: the "full report" view
+   previously fabricated ALL of the following client-side, from the
+   lightweight ScannedEmail shape, and said so in its own footer
+   ("generated from mock analysis data in a frontend prototype"):
+     - mockSha256() — a fake hash function
+     - "Assigned Analyst: M. Chen" — a fabricated name
+     - confidence derived as threatScore*0.9+8 — explicitly forbidden
+       by spec Section 14 ("do not calculate frontend confidence from
+       threat score")
+     - related-email count computed from the frontend's own mock
+       dataset
+     - the entire "Related Campaigns" section — every field hardcoded
+       to null
+     - "Recommended Actions" sourced from an unused mock
+       reportSections field, never Batch 5C's real data
+   Replaced with a real fetch to GET /api/v1/emails/:emailId/report
+   whenever an email is selected, and rewrote every report section to
+   render the actual backend fields: real SHA-256/timestamps, real
+   risk.score/level/classification/confidence/evidenceCoverage plus
+   the category-score breakdown, real header anomalies and the actual
+   per-hop received chain, real IOC counts, real ML
+   (model/version/classification/probability), real AI
+   (attackType/summary/aiContentScore/status — shown as AI UNAVAILABLE
+   when no provider is configured, never fabricated), real Batch 5B
+   campaign/correlation data, real Batch 5C recommended actions, and
+   the real backend limitations array. The single-click preview
+   (renderReportsPreview, using the already-correct lightweight
+   ScannedEmail shape) was left unchanged — only the fabricated
+   full-report content was replaced. Selection/navigation architecture
+   (useActiveCase, InvestigationShell, InvestigationWorkspace) is
+   untouched.
+
+10. FRONTEND/src/pages/InfrastructurePage.tsx: added a real "Likely
+    Related Campaign" card using actual Batch 5B data (getRelatedEmails),
+    fetched alongside the existing detail fetch so a correlation-fetch
+    failure never blocks the rest of the infrastructure view. The
+    existing infrastructure relationship graph visualization (built
+    from IP intelligence, not fabricated, just not sourced from the
+    dedicated Batch 5A /graph endpoint) was left as-is — see
+    limitations below.
+
+TESTS
+
+- tests/security.test.ts (new, 11 tests): traversal-style/path-
+  separator/null-byte emailId rejection across multiple routes sharing
+  the router.param validator; well-formed-but-nonexistent emailId
+  still 404s correctly; corrupted stored JSON returns a controlled 500
+  without leaking the raw parser error or any filesystem path;
+  non-.eml upload rejected through the ApiError path; X-Powered-By
+  absent; safe headers present; no response body ever contains a stack
+  trace.
+- tests/scan-oversized.test.ts: updated to assert 413 (was 400) per
+  the corrected status code.
+- tests/reportBuilder.test.ts (+2 tests): the report's received chain
+  includes real per-hop data, and is an empty array (not fabricated)
+  when header analysis is unavailable.
+
+RESULTS
+
+- npm test: 259/259 passing (13 new/updated, 246 baseline unchanged).
+- npm run build: clean (backend and frontend).
+- npx tsc --noEmit: clean on the backend; only the same pre-existing,
+  unrelated ForensicsPage.tsx errors remain on the frontend (not
+  touched, not introduced here — auth status typing, flagged in an
+  earlier unrelated fix).
+- End-to-end smoke test performed live: scan -> detail (ML AVAILABLE,
+  real probability, 2 recommendations) -> graph (real evidence-backed
+  nodes/edges) -> related -> report (real receivedChain, real SHA-256)
+  -> a deliberately malformed .eml scanned without crashing (201, not
+  500).
+
+REMAINING LIMITATIONS (not addressed in this patch, scoped out given
+time — flagged for a follow-up rather than rushed):
+  - InfrastructurePage's relationship-graph VISUALIZATION still builds
+    its nodes/edges from IP intelligence client-side rather than
+    fetching Batch 5A's dedicated /graph endpoint directly. Not
+    fabricated data, just not the canonical source — lower priority
+    than the campaign-correlation gap (which was fully missing) since
+    this was already a reasonable, honest simplification.
+  - OverviewPage/CasesPage/ScannerPage were not re-audited in this
+    pass for residual mock-data usage beyond what earlier fixes in
+    this conversation already addressed.
+  - No live Gemini network test was possible from this sandbox (no
+    egress to generativelanguage.googleapis.com) — AI pipeline
+    correctness for a real configured key/model was not verified live
+    in this batch (was verified in an earlier session per the user's
+    own confirmation that Gemini is now working).
+  - Demo dataset composition (Section 32) was not audited — no
+    existing demo-seed-data mechanism was found in the current
+    codebase to verify against.
+---
+ FRONTEND/src/api/api.ts                       | 156 +++++++
+ FRONTEND/src/pages/InfrastructurePage.tsx     |  50 ++-
+ FRONTEND/src/pages/ReportsPage.tsx            | 399 +++++++++++-------
+ backend-batch3.5/backend/.env.example         |   4 +-
+ .../backend/src/analyzers/reportBuilder.ts    |  22 +-
+ backend-batch3.5/backend/src/app.ts           |  25 +-
+ backend-batch3.5/backend/src/routes/emails.ts |  15 +
+ .../backend/src/services/emailStore.ts        |  16 +-
+ .../backend/src/utils/apiError.ts             |  19 +
+ backend-batch3.5/backend/src/utils/upload.ts  |  12 +-
+ .../backend/tests/reportBuilder.test.ts       |  32 ++
+ .../backend/tests/scan-oversized.test.ts      |   2 +-
+ .../backend/tests/security.test.ts            | 112 +++++
+ backend-batch3.5/backend/tsconfig.json        |   4 +-
+ 14 files changed, 691 insertions(+), 177 deletions(-)
+ create mode 100644 backend-batch3.5/backend/tests/security.test.ts
+
+diff --git a/FRONTEND/src/api/api.ts b/FRONTEND/src/api/api.ts
+index eecb2db..f9ea7c4 100644
+--- a/FRONTEND/src/api/api.ts
++++ b/FRONTEND/src/api/api.ts
+@@ -131,6 +131,162 @@ export async function getEmail(emailId: string) {
+   return response.json();
+ }
+ 
++// The shape returned by GET /api/v1/emails/:emailId/report (Batch 6).
++// Mirrors backend src/analyzers/reportBuilder.ts's ForensicReportContent
++// exactly — kept as its own type (not reused from ApiEmailDetail) since
++// the report is a distinct, purpose-built projection, not the raw
++// stored record.
++export interface ApiForensicReport {
++  emailId: string;
++  generatedAt: string;
++  caseInformation: { emailId: string; caseId: string | null; filename: string; generatedAt: string };
++  evidenceIntegrity: {
++    sha256: string;
++    fileSizeBytes: number;
++    collectedAt: string;
++    storagePath: string;
++    note: string;
++  };
++  emailMetadata: {
++    subject: string | null;
++    from: Array<{ displayName: string | null; email: string; localPart: string; domain: string }>;
++    to: Array<{ displayName: string | null; email: string; localPart: string; domain: string }>;
++    date: string | null;
++    messageId: string | null;
++    attachmentCount: number;
++    status: "AVAILABLE" | "UNAVAILABLE";
++  };
++  authentication: {
++    spf: { result: string; raw: string | null } | null;
++    dkim: { result: string; raw: string | null } | null;
++    dmarc: { result: string; policy: string | null; raw: string | null } | null;
++    status: "AVAILABLE" | "UNAVAILABLE";
++  };
++  headerForensics: {
++    status: string;
++    anomalyCount: number;
++    anomalies: { type: string; severity: string; message: string; provenance: string }[];
++    receivedHopCount: number;
++    receivedChain: {
++      hop: number;
++      fromHostname: string | null;
++      fromIp: string | null;
++      byHostname: string | null;
++      timestampIso: string | null;
++    }[];
++  };
++  threatAssessment: {
++    score: number | null;
++    level: string | null;
++    classification: string | null;
++    confidence: number | null;
++    evidenceCoverage: number | null;
++    categoryScores: Record<string, { score: number | null; status: string }> | null;
++    status: "AVAILABLE" | "INSUFFICIENT_EVIDENCE";
++  };
++  iocs: {
++    ips: string[];
++    domains: string[];
++    urls: string[];
++    hashes: string[];
++    emails: string[];
++    status: "AVAILABLE" | "UNAVAILABLE";
++  };
++  urlDomainAnalysis: {
++    urls: { url: string; hostname: string; riskNotes: string[] }[];
++    domains: { domain: string; lookalikeOf: string | null; similarityScore: number | null }[];
++    status: "AVAILABLE" | "NOT_APPLICABLE" | "UNAVAILABLE";
++  };
++  infrastructure: {
++    candidateIp: string | null;
++    country: string | null;
++    region: string | null;
++    city: string | null;
++    isp: string | null;
++    asn: string | null;
++    confidence: number | null;
++    status: string;
++    interpretation: string | null;
++  } | null;
++  mlAiAssessment: {
++    ml: {
++      model: string | null;
++      modelVersion: string | null;
++      classification: string | null;
++      probability: number | null;
++      status: string;
++    } | null;
++    ai: {
++      status: string;
++      attackType: string | null;
++      summary: string | null;
++      phishingIntent: number | null;
++      credentialHarvesting: number | null;
++      financialFraud: number | null;
++      impersonation: number | null;
++      socialEngineering: number | null;
++      malwareDelivery: number | null;
++      aiContentScore: number | null;
++      provenance: string;
++    } | null;
++  };
++  whyFlagged: { type: string; severity: string; category: string; message: string; provenance: string; weight: number }[];
++  recommendedActions: ApiRecommendation[];
++  relatedCampaign: {
++    campaignId: string | null;
++    confidence: number;
++    relatedEmailIds: string[];
++    sharedIndicators: string[];
++    sharedInfrastructure: string[];
++    reasons: string[];
++    available: boolean;
++  };
++  limitations: string[];
++}
++
++// The shape returned by GET /api/v1/emails/:emailId/related (Batch 5B).
++export interface ApiRelatedEmails {
++  emailId: string;
++  campaignId: string | null;
++  confidence: number;
++  relatedEmailIds: string[];
++  sharedIndicators: string[];
++  sharedInfrastructure: string[];
++  reasons: string[];
++}
++
++export async function getRelatedEmails(emailId: string): Promise<ApiRelatedEmails> {
++  if (typeof emailId !== "string" || emailId.trim() === "") {
++    throw new Error(
++      `getRelatedEmails requires a non-empty emailId string, received: ${JSON.stringify(emailId)}`
++    );
++  }
++
++  const response = await fetch(`/api/v1/emails/${encodeURIComponent(emailId)}/related`);
++
++  if (!response.ok) {
++    throw new Error(`Failed to load related emails: ${response.status}`);
++  }
++
++  return response.json();
++}
++
++export async function getEmailReport(emailId: string): Promise<ApiForensicReport> {
++  if (typeof emailId !== "string" || emailId.trim() === "") {
++    throw new Error(
++      `getEmailReport requires a non-empty emailId string, received: ${JSON.stringify(emailId)}`
++    );
++  }
++
++  const response = await fetch(`/api/v1/emails/${encodeURIComponent(emailId)}/report`);
++
++  if (!response.ok) {
++    throw new Error(`Failed to load report: ${response.status}`);
++  }
++
++  return response.json();
++}
++
+ export async function scanEmail(file: File) {
+   const formData = new FormData();
+   formData.append("file", file);
+diff --git a/FRONTEND/src/pages/InfrastructurePage.tsx b/FRONTEND/src/pages/InfrastructurePage.tsx
+index b7dbc75..ce53e9e 100644
+--- a/FRONTEND/src/pages/InfrastructurePage.tsx
++++ b/FRONTEND/src/pages/InfrastructurePage.tsx
+@@ -6,7 +6,7 @@ import { useActiveCase } from '@/context/ActiveCaseContext';
+ import { InvestigationShell } from '@/components/InvestigationShell';
+ import { InvestigationWorkspace, PreviewField, PreviewInvestigateButton } from '@/components/InvestigationWorkspace';
+ import { cn } from '@/lib/utils';
+-import { getEmail as fetchEmailDetails } from '@/api/api';
++import { getEmail as fetchEmailDetails, getRelatedEmails, type ApiRelatedEmails } from '@/api/api';
+ 
+ // --- TYPES ---
+ export interface InfraNode {
+@@ -137,11 +137,16 @@ export function InfrastructurePage() {
+   });
+   const [isLoadingDetails, setIsLoadingDetails] = useState(false);
+   const [detailsError, setDetailsError] = useState<string | null>(null);
++  // Batch 5B — real campaign/correlation data, fetched separately from
++  // the detail record so a failure here never blocks the rest of the
++  // infrastructure view.
++  const [relatedEmails, setRelatedEmails] = useState<ApiRelatedEmails | null>(null);
+ 
+   useEffect(() => {
+     if (!infrastructureSelectedEmailId) {
+       setActiveEmailData(null);
+       setMappedInfra({ geoData: [], infraNodes: [], infraEdges: [] });
++      setRelatedEmails(null);
+       return;
+     }
+ 
+@@ -167,6 +172,14 @@ export function InfrastructurePage() {
+         }
+       });
+ 
++    getRelatedEmails(infrastructureSelectedEmailId)
++      .then((data) => {
++        if (!cancelled) setRelatedEmails(data);
++      })
++      .catch(() => {
++        if (!cancelled) setRelatedEmails(null);
++      });
++
+     return () => {
+       cancelled = true;
+     };
+@@ -285,6 +298,41 @@ export function InfrastructurePage() {
+               <div className="text-[12px] text-ink-600 text-center py-8">No candidate source IPs identified</div>
+             )}
+           </Card>
++
++          {/* Batch 5B — real correlation data, never fabricated relationships. */}
++          <Card className="mt-5 p-5">
++            <div className="flex items-center justify-between mb-4">
++              <div className="flex items-center gap-2">
++                <Radar className="w-3.5 h-3.5 text-sky-400" />
++                <SectionLabel>Likely Related Campaign</SectionLabel>
++              </div>
++              {relatedEmails?.campaignId && (
++                <Badge variant="neutral">{Math.round(relatedEmails.confidence * 100)}% confidence</Badge>
++              )}
++            </div>
++            {relatedEmails && relatedEmails.relatedEmailIds.length > 0 ? (
++              <div className="grid grid-cols-4 gap-3">
++                <div className="panel-2 p-3">
++                  <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-1">Campaign ID</div>
++                  <div className="mono text-[12px] text-ink-200">{relatedEmails.campaignId}</div>
++                </div>
++                <div className="panel-2 p-3">
++                  <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-1">Related Emails</div>
++                  <div className="text-[12px] text-ink-200">{relatedEmails.relatedEmailIds.length}</div>
++                </div>
++                <div className="panel-2 p-3">
++                  <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-1">Shared Indicators</div>
++                  <div className="text-[12px] text-ink-200">{relatedEmails.sharedIndicators.length}</div>
++                </div>
++                <div className="panel-2 p-3">
++                  <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-1">Shared Infrastructure</div>
++                  <div className="text-[12px] text-ink-200">{relatedEmails.sharedInfrastructure.length}</div>
++                </div>
++              </div>
++            ) : (
++              <div className="text-[12px] text-ink-600 text-center py-4">No related emails or campaign correlation found</div>
++            )}
++          </Card>
+         </div>
+       )}
+     </InvestigationShell>
+diff --git a/FRONTEND/src/pages/ReportsPage.tsx b/FRONTEND/src/pages/ReportsPage.tsx
+index 8d4575f..d796109 100644
+--- a/FRONTEND/src/pages/ReportsPage.tsx
++++ b/FRONTEND/src/pages/ReportsPage.tsx
+@@ -1,4 +1,4 @@
+-import { useState, useMemo } from 'react';
++import { useState, useMemo, useEffect } from 'react';
+ import { useLocation } from 'react-router-dom';
+ import {
+   FileText,
+@@ -10,41 +10,17 @@ import {
+   CheckCircle,
+   XCircle,
+   AlertTriangle,
++  Loader2,
+ } from 'lucide-react';
+ import { Card, SectionLabel, Badge, Divider } from '@/components/ui/Primitives';
+ import { useActiveCase } from '@/context/ActiveCaseContext';
+ import { InvestigationShell } from '@/components/InvestigationShell';
+ import { InvestigationWorkspace, PreviewField, PreviewInvestigateButton } from '@/components/InvestigationWorkspace';
+ import { ProvenanceTag, provenanceMeta, type Provenance } from '@/components/ProvenanceTag';
+-import { mockEmails, type ScannedEmail } from '@/data/mockData';
++import { type ScannedEmail } from '@/data/mockData';
++import { getEmailReport, type ApiForensicReport } from '@/api/api';
+ import { cn } from '@/lib/utils';
+ 
+-/** Same cosmetic-only placeholder hash used on the Scanner page — not a real
+- *  digest, just a deterministic-looking stand-in until a backend supplies one. */
+-function mockSha256(seed: string): string {
+-  let h1 = 0x811c9dc5;
+-  for (let i = 0; i < seed.length; i++) {
+-    h1 ^= seed.charCodeAt(i);
+-    h1 = Math.imul(h1, 0x01000193);
+-  }
+-  let out = '';
+-  let x = h1 >>> 0;
+-  while (out.length < 64) {
+-    x = (Math.imul(x, 48271) + 1) >>> 0;
+-    out += x.toString(16).padStart(8, '0');
+-  }
+-  return out.slice(0, 64);
+-}
+-
+-function getRecommendedAction(email: ScannedEmail): string | null {
+-  return email.reportSections.find((s) => s.title === 'RECOMMENDATIONS')?.content ?? null;
+-}
+-
+-function getRelatedEmailCount(email: ScannedEmail): number {
+-  if (!email.caseId) return 0;
+-  return mockEmails.filter((e) => e.caseId === email.caseId && e.id !== email.id).length;
+-}
+-
+ /**
+  * Six-value provenance taxonomy used sparingly — one badge per report
+  * section, never per field, so it stays "subtle" rather than overwhelming.
+@@ -92,6 +68,38 @@ export function ReportsPage() {
+ 
+   const activeEmail = useMemo(() => getEmail(reportsSelectedEmailId), [getEmail, reportsSelectedEmailId]);
+ 
++  // The real backend report (Batch 6) — fetched fresh whenever the
++  // selected email changes. This replaces the old client-side
++  // fabrication (mock hash, mock analyst, mock campaign fields) with
++  // the actual GET /api/v1/emails/:emailId/report response.
++  const [report, setReport] = useState<ApiForensicReport | null>(null);
++  const [reportLoading, setReportLoading] = useState(false);
++  const [reportError, setReportError] = useState<string | null>(null);
++
++  useEffect(() => {
++    if (!reportsSelectedEmailId) {
++      setReport(null);
++      setReportError(null);
++      return;
++    }
++    let cancelled = false;
++    setReportLoading(true);
++    setReportError(null);
++    getEmailReport(reportsSelectedEmailId)
++      .then((data) => {
++        if (!cancelled) setReport(data);
++      })
++      .catch((err) => {
++        if (!cancelled) setReportError(err instanceof Error ? err.message : 'Failed to load report');
++      })
++      .finally(() => {
++        if (!cancelled) setReportLoading(false);
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [reportsSelectedEmailId]);
++
+   const handleInvestigate = (email: ScannedEmail) => {
+     setReportsSelectedEmailId(email.id);
+     setLastViewed(email.id);
+@@ -131,24 +139,31 @@ export function ReportsPage() {
+     >
+       {!activeEmail ? (
+         <InvestigationWorkspace onInvestigate={handleInvestigate} renderPreview={renderReportsPreview} enableCaseFilter />
+-      ) : (
+-        <FullReport email={activeEmail} />
+-      )}
++      ) : reportLoading ? (
++        <div className="flex items-center justify-center gap-2 py-20 text-ink-500 text-[12px]">
++          <Loader2 className="w-4 h-4 animate-spin" /> Loading report…
++        </div>
++      ) : reportError ? (
++        <Card className="p-6 text-center">
++          <div className="text-[13px] text-ink-300 mb-1">Failed to load report</div>
++          <div className="text-[11px] text-ink-500">{reportError}</div>
++        </Card>
++      ) : report ? (
++        <FullReport report={report} />
++      ) : null}
+     </InvestigationShell>
+   );
+ }
+ 
+-function FullReport({ email }: { email: ScannedEmail }) {
+-  const isThreat = email.threatScore >= 60;
+-  const hash = mockSha256(`${email.id}:${email.subject}`);
+-  const filename = `${email.id}.eml`;
+-  const relatedCount = getRelatedEmailCount(email);
+-  const recommendedAction = getRecommendedAction(email);
+-  const confidence = Math.min(99, Math.round(email.threatScore * 0.9 + 8));
+-  const urlDomainIocs = email.indicators.filter((i) => i.type === 'URL' || i.type === 'Domain');
++function FullReport({ report }: { report: ApiForensicReport }) {
++  const risk = report.threatAssessment;
++  const isThreat = (risk.score ?? 0) >= 60;
++  const ml = report.mlAiAssessment.ml;
++  const ai = report.mlAiAssessment.ai;
++  const campaign = report.relatedCampaign;
+ 
+   return (
+-    <div key={email.id} className="space-y-5 animate-fade-in">
++    <div key={report.emailId} className="space-y-5 animate-fade-in">
+       {/* Report header — quick-glance identity + evidence integrity summary */}
+       <Card className="p-5">
+         <div className="flex items-start justify-between mb-4 flex-wrap gap-3">
+@@ -158,83 +173,96 @@ function FullReport({ email }: { email: ScannedEmail }) {
+             </div>
+             <div>
+               <div className="text-base font-bold text-ink-50">Forensic Analysis Report</div>
+-              <div className="text-[11px] text-ink-500 mt-0.5">{email.subject}</div>
++              <div className="text-[11px] text-ink-500 mt-0.5">{report.emailMetadata.subject ?? 'UNAVAILABLE'}</div>
+             </div>
+           </div>
+           <div className="flex gap-2">
+-            <Badge variant={isThreat ? 'critical' : 'neutral'}>{email.riskLevel}</Badge>
+-            <Badge variant="danger">{email.classification}</Badge>
++            <Badge variant={isThreat ? 'critical' : 'neutral'}>{risk.level ?? 'UNKNOWN'}</Badge>
++            <Badge variant="danger">{risk.classification ?? 'unclassified'}</Badge>
+           </div>
+         </div>
+         <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
+-          <Field label="Email ID" value={email.id} mono />
+-          <Field label="Case ID" value={email.caseId || null} mono />
+-          <Field label="Original Filename" value={filename} mono />
+-          <Field label="SHA-256" value={hash} mono />
+-          <Field label="Upload Timestamp" value={email.date} mono />
+-          <Field label="Analysis Timestamp" value={null} mono />
++          <Field label="Email ID" value={report.emailId} mono />
++          <Field label="Case ID" value={report.caseInformation.caseId} mono />
++          <Field label="Original Filename" value={report.caseInformation.filename} mono />
++          <Field label="SHA-256" value={report.evidenceIntegrity.sha256} mono />
++          <Field label="Upload Timestamp" value={report.evidenceIntegrity.collectedAt} mono />
++          <Field label="Report Generated" value={report.generatedAt} mono />
+         </div>
+       </Card>
+ 
+       <ReportSection num={1} title="Case Information" provenance="observed">
+-        <div className="grid grid-cols-4 gap-3">
+-          <Field label="Case ID" value={email.caseId || null} mono />
+-          <Field label="Email ID" value={email.id} mono />
+-          <Field label="Assigned Analyst" value="M. Chen" />
+-          <Field label="Analysis Status" value="Automated Analysis Complete" />
++        <div className="grid grid-cols-3 gap-3">
++          <Field label="Case ID" value={report.caseInformation.caseId} mono />
++          <Field label="Email ID" value={report.caseInformation.emailId} mono />
++          <Field label="Report Generated" value={report.caseInformation.generatedAt} mono />
+         </div>
+       </ReportSection>
+ 
+       <ReportSection num={2} title="Evidence Integrity" provenance="observed">
+         <div className="grid grid-cols-4 gap-3">
+-          <Field label="Original Filename" value={filename} mono />
+-          <Field label="SHA-256 Hash" value={hash} mono />
+-          <Field label="Upload Timestamp" value={email.date} mono />
+-          <Field label="Analysis Timestamp" value={null} mono />
++          <Field label="Original Filename" value={report.caseInformation.filename} mono />
++          <Field label="SHA-256 Hash" value={report.evidenceIntegrity.sha256} mono />
++          <Field label="Upload Timestamp" value={report.evidenceIntegrity.collectedAt} mono />
++          <Field label="File Size" value={`${report.evidenceIntegrity.fileSizeBytes} bytes`} mono />
+         </div>
++        <p className="text-[11px] text-ink-500 mt-3">{report.evidenceIntegrity.note}</p>
+       </ReportSection>
+ 
+       <ReportSection num={3} title="Email Metadata" provenance="observed">
+-        <div className="grid grid-cols-4 gap-3">
+-          <Field label="Sender" value={email.sender} mono />
+-          <Field label="Recipient" value={email.recipient} mono />
+-          <Field label="Subject" value={email.subject} />
+-          <Field label="Date" value={email.date} mono />
+-          <Field label="Size" value={email.size} mono />
+-          <Field label="Message-ID" value={email.headers?.['Message-ID'] || null} mono />
+-        </div>
++        {report.emailMetadata.status === 'AVAILABLE' ? (
++          <div className="grid grid-cols-4 gap-3">
++            <Field label="Sender" value={report.emailMetadata.from[0]?.email ?? null} mono />
++            <Field label="Recipient" value={report.emailMetadata.to[0]?.email ?? null} mono />
++            <Field label="Subject" value={report.emailMetadata.subject} />
++            <Field label="Date" value={report.emailMetadata.date} mono />
++            <Field label="Message-ID" value={report.emailMetadata.messageId} mono />
++            <Field label="Attachments" value={String(report.emailMetadata.attachmentCount)} mono />
++          </div>
++        ) : (
++          <div className="text-[11px] text-ink-600">Email metadata unavailable</div>
++        )}
+       </ReportSection>
+ 
+       <ReportSection num={4} title="Authentication" provenance="deterministic">
+-        <div className="grid grid-cols-3 gap-3 mb-4">
+-          <AuthMini label="SPF" status={email.spf} />
+-          <AuthMini label="DKIM" status={email.dkim} />
+-          <AuthMini label="DMARC" status={email.dmarc} />
+-        </div>
+-        <p className="text-[12px] text-ink-400 leading-relaxed">{email.authenticationSummary}</p>
++        {report.authentication.status === 'AVAILABLE' ? (
++          <div className="grid grid-cols-3 gap-3">
++            <AuthMini label="SPF" status={report.authentication.spf?.result ?? 'unavailable'} />
++            <AuthMini label="DKIM" status={report.authentication.dkim?.result ?? 'unavailable'} />
++            <AuthMini label="DMARC" status={report.authentication.dmarc?.result ?? 'unavailable'} />
++          </div>
++        ) : (
++          <div className="text-[11px] text-ink-600">Authentication data unavailable</div>
++        )}
+       </ReportSection>
+ 
+       <ReportSection num={5} title="Header Forensics" provenance="observed">
+-        <div className="max-h-64 overflow-y-auto scrollbar-thin divide-y divide-base-500/10">
+-          {Object.entries(email.headers).map(([k, v]) => (
+-            <div key={k} className="flex items-start gap-4 py-2">
+-              <span className="mono text-[10px] text-ink-500 w-40 shrink-0">{k}</span>
+-              <span className="mono text-[11px] text-ink-300 break-all">{v}</span>
+-            </div>
+-          ))}
+-        </div>
++        {report.headerForensics.anomalies.length > 0 ? (
++          <div className="space-y-2">
++            {report.headerForensics.anomalies.map((a, i) => (
++              <div key={i} className="panel-2 p-3">
++                <div className="flex items-center justify-between mb-1">
++                  <span className="mono text-[10px] text-ink-500">{a.type}</span>
++                  <Badge variant={a.severity === 'high' ? 'danger' : a.severity === 'medium' ? 'warning' : 'neutral'}>{a.severity}</Badge>
++                </div>
++                <div className="text-[11px] text-ink-300">{a.message}</div>
++              </div>
++            ))}
++          </div>
++        ) : (
++          <div className="text-[11px] text-ink-600">No header anomalies detected ({report.headerForensics.status})</div>
++        )}
+       </ReportSection>
+ 
+       <ReportSection num={6} title="Received Relay Chain" provenance="observed">
+-        {email.receivedChain.length > 0 ? (
++        {report.headerForensics.receivedChain.length > 0 ? (
+           <div className="space-y-2.5">
+-            {email.receivedChain.map((hop, i) => (
+-              <div key={i} className="panel-2 p-3 grid grid-cols-4 gap-3 items-center">
++            {report.headerForensics.receivedChain.map((hop) => (
++              <div key={hop.hop} className="panel-2 p-3 grid grid-cols-4 gap-3 items-center">
+                 <span className="mono text-[10px] text-accent-500">Hop {hop.hop}</span>
+-                <span className="mono text-[11px] text-ink-300 truncate">{hop.from}</span>
+-                <span className="mono text-[11px] text-ink-300 truncate">{hop.by}</span>
+-                <span className="mono text-[10px] text-ink-500">{hop.timestamp}</span>
+-                {hop.from.includes('unknown') && <Badge variant="warning" className="col-span-4 w-fit">Inferred: Forged Hop</Badge>}
++                <span className="mono text-[11px] text-ink-300 truncate">{hop.fromHostname ?? hop.fromIp ?? 'unknown'}</span>
++                <span className="mono text-[11px] text-ink-300 truncate">{hop.byHostname ?? 'unknown'}</span>
++                <span className="mono text-[10px] text-ink-500">{hop.timestampIso ?? 'unavailable'}</span>
+               </div>
+             ))}
+           </div>
+@@ -244,37 +272,67 @@ function FullReport({ email }: { email: ScannedEmail }) {
+       </ReportSection>
+ 
+       <ReportSection num={7} title="Threat Assessment" provenance="deterministic">
+-        <div className="grid grid-cols-4 gap-3 mb-4">
+-          <Field label="Threat Score" value={String(email.threatScore)} mono />
+-          <Field label="Risk Level" value={email.riskLevel} />
+-          <Field label="Classification" value={email.classification} />
+-          <Field label="Status" value={email.status} />
+-        </div>
+-        <p className="text-[12px] text-ink-400 leading-relaxed">{email.threatSummary}</p>
++        {risk.status === 'AVAILABLE' ? (
++          <>
++            <div className="grid grid-cols-5 gap-3 mb-4">
++              <Field label="Overall Risk" value={risk.score !== null ? String(risk.score) : null} mono />
++              <Field label="Risk Level" value={risk.level} />
++              <Field label="Classification" value={risk.classification} />
++              <Field label="Risk Confidence" value={risk.confidence !== null ? `${Math.round(risk.confidence * 100)}%` : null} mono />
++              <Field label="Evidence Coverage" value={risk.evidenceCoverage !== null ? `${Math.round(risk.evidenceCoverage * 100)}%` : null} mono />
++            </div>
++            {risk.categoryScores && (
++              <div className="grid grid-cols-5 gap-2">
++                {Object.entries(risk.categoryScores).map(([category, result]) => (
++                  <div key={category} className="panel-2 p-2.5 text-center">
++                    <div className="text-[9px] uppercase tracking-wider text-ink-500 mb-1">{category}</div>
++                    <div className="text-[13px] font-bold text-ink-200">{result.score ?? '—'}</div>
++                    <div className="text-[8px] text-ink-600 mt-0.5">{result.status}</div>
++                  </div>
++                ))}
++              </div>
++            )}
++          </>
++        ) : (
++          <div className="text-[11px] text-ink-600">Insufficient evidence to compute a threat score</div>
++        )}
+       </ReportSection>
+ 
+       <ReportSection num={8} title="Indicators" provenance="external">
+-        <div className="grid grid-cols-5 gap-2 mb-3">
+-          {(['IP', 'Domain', 'URL', 'Hash', 'Email'] as const).map((type) => (
+-            <div key={type} className="panel-2 p-2 text-center">
+-              <div className="text-[14px] font-bold text-ink-200">{email.indicators.filter((i) => i.type === type).length}</div>
+-              <div className="text-[8px] text-ink-600 uppercase tracking-wider mt-0.5">{type}</div>
+-            </div>
+-          ))}
+-        </div>
+-        <div className="text-[10px] text-ink-600">{email.indicators.length} total indicators processed — see the Indicators tab for full detail.</div>
++        {report.iocs.status === 'AVAILABLE' ? (
++          <div className="grid grid-cols-5 gap-2 mb-3">
++            {([
++              ['IP', report.iocs.ips.length],
++              ['Domain', report.iocs.domains.length],
++              ['URL', report.iocs.urls.length],
++              ['Hash', report.iocs.hashes.length],
++              ['Email', report.iocs.emails.length],
++            ] as const).map(([type, count]) => (
++              <div key={type} className="panel-2 p-2 text-center">
++                <div className="text-[14px] font-bold text-ink-200">{count}</div>
++                <div className="text-[8px] text-ink-600 uppercase tracking-wider mt-0.5">{type}</div>
++              </div>
++            ))}
++          </div>
++        ) : (
++          <div className="text-[11px] text-ink-600">No IOC data available</div>
++        )}
+       </ReportSection>
+ 
+       <ReportSection num={9} title="URL / Domain Analysis" provenance="external">
+-        {urlDomainIocs.length > 0 ? (
++        {report.urlDomainAnalysis.status === 'AVAILABLE' ? (
+           <div className="space-y-1.5">
+-            {urlDomainIocs.map((ioc) => (
+-              <div key={ioc.id} className="flex items-center gap-2 text-[11px] panel-2 px-2.5 py-2">
+-                <span className="mono text-ink-600 w-14 uppercase text-[9px]">{ioc.type}</span>
+-                <span className="text-ink-300 truncate mono flex-1">{ioc.value}</span>
+-                <span className={cn('text-[9px] font-semibold uppercase', ioc.reputation === 'malicious' ? 'text-accent-400' : ioc.reputation === 'suspicious' ? 'text-amber-400' : ioc.reputation === 'clean' ? 'text-emerald-400' : 'text-ink-500')}>
+-                  {ioc.reputation === 'unknown' ? 'Unavailable' : ioc.reputation}
+-                </span>
++            {report.urlDomainAnalysis.domains.map((d, i) => (
++              <div key={`d-${i}`} className="flex items-center gap-2 text-[11px] panel-2 px-2.5 py-2">
++                <span className="mono text-ink-600 w-16 uppercase text-[9px]">domain</span>
++                <span className="text-ink-300 truncate mono flex-1">{d.domain}</span>
++                {d.lookalikeOf && <Badge variant="warning">resembles {d.lookalikeOf}</Badge>}
++              </div>
++            ))}
++            {report.urlDomainAnalysis.urls.map((u, i) => (
++              <div key={`u-${i}`} className="flex items-center gap-2 text-[11px] panel-2 px-2.5 py-2">
++                <span className="mono text-ink-600 w-16 uppercase text-[9px]">url</span>
++                <span className="text-ink-300 truncate mono flex-1">{u.url}</span>
+               </div>
+             ))}
+           </div>
+@@ -284,15 +342,13 @@ function FullReport({ email }: { email: ScannedEmail }) {
+       </ReportSection>
+ 
+       <ReportSection num={10} title="Infrastructure / Geolocation" provenance="external">
+-        {email.geoData.length > 0 ? (
++        {report.infrastructure ? (
+           <div className="grid grid-cols-3 gap-3">
+-            {email.geoData.map((geo) => (
+-              <div key={geo.ip} className="panel-2 p-3">
+-                <div className="mono text-[11px] text-ink-200 mb-1.5">{geo.ip}</div>
+-                <div className="text-[10px] text-ink-500">{geo.city}, {geo.country}</div>
+-                <div className="text-[10px] text-ink-600 mt-1">ISP: {geo.isp} · ASN: {geo.asn}</div>
+-              </div>
+-            ))}
++            <div className="panel-2 p-3">
++              <div className="mono text-[11px] text-ink-200 mb-1.5">{report.infrastructure.candidateIp ?? 'UNAVAILABLE'}</div>
++              <div className="text-[10px] text-ink-500">{report.infrastructure.city ?? '—'}, {report.infrastructure.country ?? '—'}</div>
++              <div className="text-[10px] text-ink-600 mt-1">ISP: {report.infrastructure.isp ?? '—'} · ASN: {report.infrastructure.asn ?? '—'}</div>
++            </div>
+           </div>
+         ) : (
+           <div className="text-[11px] text-ink-600">No infrastructure geolocation data available</div>
+@@ -300,54 +356,77 @@ function FullReport({ email }: { email: ScannedEmail }) {
+       </ReportSection>
+ 
+       <ReportSection num={11} title="ML Assessment" provenance="ml">
+-        <div className="grid grid-cols-3 gap-3">
+-          <Field label="Model Output Score" value={String(email.threatScore)} mono />
+-          <Field label="Classification" value={email.classification} />
+-          <Field label="Risk Level" value={email.riskLevel} />
+-        </div>
++        {ml && ml.status === 'AVAILABLE' ? (
++          <div className="grid grid-cols-4 gap-3">
++            <Field label="Model" value={ml.model} mono />
++            <Field label="Model Version" value={ml.modelVersion} mono />
++            <Field label="Classification" value={ml.classification} />
++            <Field label="Probability" value={ml.probability !== null ? `${Math.round(ml.probability * 100)}%` : null} mono />
++          </div>
++        ) : (
++          <div className="text-[11px] text-ink-600">ML UNAVAILABLE — {ml?.status ?? 'not run'}</div>
++        )}
+       </ReportSection>
+ 
+       <ReportSection num={12} title="AI Assessment" provenance="ai">
+-        <div className="mb-3">
+-          <Field label="Model Confidence" value={`${confidence}%`} mono />
+-        </div>
+-        <p className="text-[12px] text-ink-400 leading-relaxed">{email.threatSummary}</p>
++        {ai && ai.status === 'AVAILABLE' ? (
++          <>
++            <div className="grid grid-cols-3 gap-3 mb-3">
++              <Field label="Attack Type" value={ai.attackType} />
++              <Field label="AI Content Score" value={ai.aiContentScore !== null ? `${Math.round(ai.aiContentScore * 100)}%` : null} mono />
++              <Field label="Phishing Intent" value={ai.phishingIntent !== null ? `${Math.round(ai.phishingIntent * 100)}%` : null} mono />
++            </div>
++            <p className="text-[12px] text-ink-400 leading-relaxed">{ai.summary}</p>
++          </>
++        ) : (
++          <div className="text-[11px] text-ink-600">AI UNAVAILABLE — {ai?.status ?? 'no provider configured'}</div>
++        )}
+       </ReportSection>
+ 
+       <ReportSection num={13} title="Related Campaigns / Emails" provenance="inferred">
+-        <div className="panel-2 p-3 mb-3">
+-          <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-1">Related Emails In Case</div>
+-          <div className="text-[12px] text-ink-200">
+-            {email.caseId ? `${relatedCount} other email${relatedCount === 1 ? '' : 's'} in ${email.caseId}` : 'Not part of a case'}
+-          </div>
+-        </div>
+-        <div className="flex items-center gap-1.5 mb-2">
+-          <Radar className="w-3 h-3 text-sky-400" />
+-          <span className="text-[9px] font-semibold uppercase tracking-wider text-ink-500">Likely Related Campaign</span>
+-        </div>
+-        <div className="grid grid-cols-4 gap-3">
+-          <Field label="Campaign ID" value={null} />
+-          <Field label="Shared Indicators" value={null} />
+-          <Field label="Shared Infrastructure" value={null} />
+-          <Field label="Correlation Confidence" value={null} />
+-        </div>
++        {campaign.available && campaign.relatedEmailIds.length > 0 ? (
++          <>
++            <div className="flex items-center gap-1.5 mb-2">
++              <Radar className="w-3 h-3 text-sky-400" />
++              <span className="text-[9px] font-semibold uppercase tracking-wider text-ink-500">Likely Related Campaign</span>
++            </div>
++            <div className="grid grid-cols-4 gap-3">
++              <Field label="Campaign ID" value={campaign.campaignId} mono />
++              <Field label="Related Emails" value={String(campaign.relatedEmailIds.length)} />
++              <Field label="Shared Indicators" value={campaign.sharedIndicators.length ? String(campaign.sharedIndicators.length) : null} />
++              <Field label="Correlation Confidence" value={`${Math.round(campaign.confidence * 100)}%`} mono />
++            </div>
++          </>
++        ) : (
++          <div className="text-[11px] text-ink-600">No related emails or campaign correlation found</div>
++        )}
+       </ReportSection>
+ 
+-      <ReportSection num={14} title="Recommended Actions" provenance="ai">
+-        {recommendedAction ? (
+-          <p className="text-[12px] text-ink-300 leading-relaxed whitespace-pre-line">{recommendedAction}</p>
++      <ReportSection num={14} title="Recommended Actions" provenance="deterministic">
++        {report.recommendedActions.length > 0 ? (
++          <ul className="space-y-3">
++            {report.recommendedActions.map((rec, i) => (
++              <li key={i} className="text-[12px]">
++                <div className="flex items-center gap-2 mb-1">
++                  <Badge variant={rec.priority === 'critical' || rec.priority === 'high' ? 'danger' : 'neutral'}>{rec.priority}</Badge>
++                  <span className="mono text-[11px] text-ink-200 font-semibold">{rec.action}</span>
++                </div>
++                <p className="text-ink-400">{rec.reason}</p>
++              </li>
++            ))}
++          </ul>
+         ) : (
+-          <div className="text-[11px] text-ink-600">No recommended actions available</div>
++          <div className="text-[11px] text-ink-600">No recommended actions for this email</div>
+         )}
+       </ReportSection>
+ 
+       <ReportSection num={15} title="Why Flagged" provenance="deterministic">
+-        {email.whyFlagged.length > 0 ? (
++        {report.whyFlagged.length > 0 ? (
+           <ul className="space-y-2">
+-            {email.whyFlagged.map((reason, i) => (
++            {report.whyFlagged.map((item, i) => (
+               <li key={i} className="flex items-start gap-3 text-[12px] text-ink-300 leading-relaxed">
+                 <span className="mono text-[10px] text-accent-600 mt-0.5 shrink-0">{String(i + 1).padStart(2, '0')}</span>
+-                <span>{reason}</span>
++                <span>{item.message}</span>
+               </li>
+             ))}
+           </ul>
+@@ -370,18 +449,12 @@ function FullReport({ email }: { email: ScannedEmail }) {
+ 
+       <ReportSection num={17} title="Limitations">
+         <ul className="space-y-2.5">
+-          <li className="flex items-start gap-2.5 text-[12px] text-ink-300 leading-relaxed">
+-            <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
+-            <span>Geolocation represents probable network infrastructure and does not establish attacker identity or physical location.</span>
+-          </li>
+-          <li className="flex items-start gap-2.5 text-[12px] text-ink-300 leading-relaxed">
+-            <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
+-            <span>Threat scores are analytical risk assessments and are not legal conclusions.</span>
+-          </li>
+-          <li className="flex items-start gap-2.5 text-[12px] text-ink-500 leading-relaxed">
+-            <ShieldQuestion className="w-3.5 h-3.5 text-ink-600 mt-0.5 shrink-0" />
+-            <span>This report is generated from mock analysis data in a frontend prototype and has not been reviewed by a human analyst.</span>
+-          </li>
++          {report.limitations.map((limitation, i) => (
++            <li key={i} className="flex items-start gap-2.5 text-[12px] text-ink-300 leading-relaxed">
++              <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
++              <span>{limitation}</span>
++            </li>
++          ))}
+           <li className="flex items-start gap-2.5 text-[12px] text-ink-500 leading-relaxed">
+             <ShieldQuestion className="w-3.5 h-3.5 text-ink-600 mt-0.5 shrink-0" />
+             <span>Fields marked UNAVAILABLE reflect data the backend has not yet supplied, not a negative finding.</span>
+diff --git a/backend-batch3.5/backend/.env.example b/backend-batch3.5/backend/.env.example
+index d360fe3..dea4a56 100644
+--- a/backend-batch3.5/backend/.env.example
++++ b/backend-batch3.5/backend/.env.example
+@@ -39,5 +39,5 @@ DNS_TIMEOUT_MS=2000
+ # as "unset", not as an empty path)
+ ML_MODEL_PATH=
+ 
+-# Upload limits (Batch 1)
+-MAX_UPLOAD_BYTES=5242880
++# Upload limits (Batch 1; ~25MB default since Batch 7)
++MAX_UPLOAD_BYTES=26214400
+diff --git a/backend-batch3.5/backend/src/analyzers/reportBuilder.ts b/backend-batch3.5/backend/src/analyzers/reportBuilder.ts
+index 60dabb1..e730ee1 100644
+--- a/backend-batch3.5/backend/src/analyzers/reportBuilder.ts
++++ b/backend-batch3.5/backend/src/analyzers/reportBuilder.ts
+@@ -50,11 +50,24 @@ export interface ReportAuthentication {
+   status: "AVAILABLE" | "UNAVAILABLE";
+ }
+ 
++export interface ReportReceivedHop {
++  hop: number;
++  fromHostname: string | null;
++  fromIp: string | null;
++  byHostname: string | null;
++  timestampIso: string | null;
++}
++
+ export interface ReportHeaderForensics {
+   status: string;
+   anomalyCount: number;
+   anomalies: { type: string; severity: string; message: string; provenance: string }[];
+   receivedHopCount: number;
++  // Batch 7: the "Received Relay Chain" report section needs the actual
++  // per-hop chain, not just a count — reusing the same data the
++  // header-forensics analyzer already computed (OBSERVED provenance),
++  // never re-derived or re-parsed here.
++  receivedChain: ReportReceivedHop[];
+ }
+ 
+ export interface ReportThreatAssessment {
+@@ -237,8 +250,15 @@ export function buildForensicReport(
+             provenance: a.provenance,
+           })),
+           receivedHopCount: record.headerAnalysis.receivedChain.length,
++          receivedChain: record.headerAnalysis.receivedChain.map((hop) => ({
++            hop: hop.hop,
++            fromHostname: hop.fromHostname,
++            fromIp: hop.fromIp,
++            byHostname: hop.byHostname,
++            timestampIso: hop.timestampIso,
++          })),
+         }
+-      : { status: "UNAVAILABLE", anomalyCount: 0, anomalies: [], receivedHopCount: 0 },
++      : { status: "UNAVAILABLE", anomalyCount: 0, anomalies: [], receivedHopCount: 0, receivedChain: [] },
+ 
+     threatAssessment: risk
+       ? {
+diff --git a/backend-batch3.5/backend/src/app.ts b/backend-batch3.5/backend/src/app.ts
+index e2f1f7a..0401e76 100644
+--- a/backend-batch3.5/backend/src/app.ts
++++ b/backend-batch3.5/backend/src/app.ts
+@@ -9,6 +9,15 @@ import type { ApiErrorBody } from "./schemas/types";
+ export function createApp() {
+   const app = express();
+ 
++  // Batch 7 hardening: don't advertise the framework, and apply two
++  // zero-dependency, low-risk safe headers appropriate for a JSON API.
++  app.disable("x-powered-by");
++  app.use((_req, res, next) => {
++    res.setHeader("X-Content-Type-Options", "nosniff");
++    res.setHeader("X-Frame-Options", "DENY");
++    next();
++  });
++
+   // Default cors() reflects the requesting Origin — enough for local Vite
+   // (typically :5173) talking to this API (typically :4000). Optional
+   // CORS_ORIGINS is a comma-separated allow-list for tighter setups;
+@@ -44,11 +53,23 @@ export function createApp() {
+       return res.status(err.status).json(body);
+     }
+     if (err instanceof multer.MulterError) {
++      // Batch 7: the spec's expected status for an oversized upload is
++      // 413 Payload Too Large, not a generic 400 — every other multer
++      // failure (wrong field name, too many files, etc.) stays 400.
++      const status = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+       const body: ApiErrorBody = { error: { code: "UPLOAD_ERROR", message: err.message } };
+-      return res.status(400).json(body);
++      return res.status(status).json(body);
+     }
+     if (err instanceof Error) {
+-      const body: ApiErrorBody = { error: { code: "BAD_REQUEST", message: err.message } };
++      // Batch 7 hardening: an unclassified Error reaching here means
++      // some code path threw without going through our own ApiError
++      // convention — its .message could reference internals (a file
++      // path, a raw parser error, etc.), so it's logged server-side
++      // for diagnosis but never echoed to the client verbatim.
++      console.error("Unclassified error:", err);
++      const body: ApiErrorBody = {
++        error: { code: "BAD_REQUEST", message: "The request could not be processed." },
++      };
+       return res.status(400).json(body);
+     }
+     console.error("Unhandled error:", err);
+diff --git a/backend-batch3.5/backend/src/routes/emails.ts b/backend-batch3.5/backend/src/routes/emails.ts
+index 5179b42..b96afa1 100644
+--- a/backend-batch3.5/backend/src/routes/emails.ts
++++ b/backend-batch3.5/backend/src/routes/emails.ts
+@@ -34,6 +34,21 @@ import type { EmailRecord, ScanAcceptedResponse } from "../schemas/types";
+ 
+ export const emailsRouter = Router();
+ 
++// Batch 7 hardening: validate the :emailId route param once, for every
++// route that declares it, instead of letting each handler pass the raw
++// value straight to storage. safeId() in emailStore.ts already strips
++// anything unsafe before touching the filesystem, so this isn't a
++// traversal fix — it's about failing a malformed ID cleanly with a 400
++// (rather than silently mangling it into an unrelated lookup that
++// 404s) and keeping obviously-invalid raw input out of error messages.
++const EMAIL_ID_PATTERN = /^[A-Za-z0-9-]{1,100}$/;
++emailsRouter.param("emailId", (req: Request, res: Response, next: NextFunction, value: string) => {
++  if (!EMAIL_ID_PATTERN.test(value)) {
++    return next(Errors.invalidEmailId());
++  }
++  return next();
++});
++
+ // POST /api/v1/emails/scan
+ // Batch 1: validates upload, preserves the original .eml untouched,
+ // hashes evidence, parses it, and persists the full EmailRecord.
+diff --git a/backend-batch3.5/backend/src/services/emailStore.ts b/backend-batch3.5/backend/src/services/emailStore.ts
+index a97c40c..878196e 100644
+--- a/backend-batch3.5/backend/src/services/emailStore.ts
++++ b/backend-batch3.5/backend/src/services/emailStore.ts
+@@ -1,5 +1,6 @@
+ import { promises as fs } from "fs";
+ import path from "path";
++import { Errors } from "../utils/apiError";
+ import type { EmailAddress, EmailRecord, EmailSummary } from "../schemas/types";
+ 
+ // Layout (Batch 1 spec section 5):
+@@ -113,7 +114,14 @@ export async function saveEmailRecord(record: EmailRecord): Promise<void> {
+ export async function getEmailRecord(emailId: string): Promise<EmailRecord | null> {
+   try {
+     const raw = await fs.readFile(parsedJsonPath(emailId), "utf-8");
+-    return JSON.parse(raw) as EmailRecord;
++    try {
++      return JSON.parse(raw) as EmailRecord;
++    } catch {
++      // Batch 7 hardening: a corrupted/truncated stored record is a
++      // server-side storage problem — surface it as a controlled 500,
++      // never let the raw JSON.parse SyntaxError reach the client.
++      throw Errors.recordUnreadable(emailId);
++    }
+   } catch (err: unknown) {
+     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+     throw err;
+@@ -123,7 +131,11 @@ export async function getEmailRecord(emailId: string): Promise<EmailRecord | nul
+ async function readSummary(emailId: string): Promise<EmailSummary | null> {
+   try {
+     const raw = await fs.readFile(summaryJsonPath(emailId), "utf-8");
+-    return JSON.parse(raw) as EmailSummary;
++    try {
++      return JSON.parse(raw) as EmailSummary;
++    } catch {
++      throw Errors.recordUnreadable(emailId);
++    }
+   } catch (err: unknown) {
+     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+       const record = await getEmailRecord(emailId);
+diff --git a/backend-batch3.5/backend/src/utils/apiError.ts b/backend-batch3.5/backend/src/utils/apiError.ts
+index c69e02f..033eb48 100644
+--- a/backend-batch3.5/backend/src/utils/apiError.ts
++++ b/backend-batch3.5/backend/src/utils/apiError.ts
+@@ -33,4 +33,23 @@ export const Errors = {
+     ),
+   invalidFilter: (message: string) => new ApiError("INVALID_FILTER", message, 400),
+   invalidPagination: (message: string) => new ApiError("INVALID_PAGINATION", message, 400),
++  // Batch 7 hardening — a route param that doesn't even look like an
++  // emailId/caseId (wrong characters, empty, unreasonably long) is
++  // rejected outright with a clean 400 instead of being silently
++  // stripped down to a different string by storage-layer sanitization
++  // and then 404ing. Keeps the raw value out of error messages too.
++  invalidEmailId: () =>
++    new ApiError("INVALID_EMAIL_ID", "emailId must be a non-empty alphanumeric/hyphen string.", 400),
++  invalidFileType: () =>
++    new ApiError("INVALID_FILE_TYPE", "Only .eml files are accepted.", 400),
++  // A stored record that fails to parse (corrupted/truncated JSON on
++  // disk) is a server-side storage problem, not something the client
++  // did wrong — never echo the raw parse error (which could reference
++  // internal file structure) to the client.
++  recordUnreadable: (emailId: string) =>
++    new ApiError(
++      "RECORD_UNREADABLE",
++      `The stored record for ${emailId} could not be read. It may be corrupted.`,
++      500
++    ),
+ };
+diff --git a/backend-batch3.5/backend/src/utils/upload.ts b/backend-batch3.5/backend/src/utils/upload.ts
+index 12d1a38..e63c02d 100644
+--- a/backend-batch3.5/backend/src/utils/upload.ts
++++ b/backend-batch3.5/backend/src/utils/upload.ts
+@@ -1,7 +1,10 @@
+ import multer from "multer";
+ import path from "path";
++import { Errors } from "./apiError";
+ 
+-const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES ?? 5 * 1024 * 1024);
++// Batch 7: ~25MB per spec — real-world .eml files with attachments
++// (PDFs, images) commonly exceed the previous 5MB default.
++const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES ?? 25 * 1024 * 1024);
+ 
+ // Memory storage: we need the raw buffer immediately (for hashing) and
+ // don't want the original filename touching the filesystem at all —
+@@ -15,9 +18,12 @@ function fileFilter(
+ ) {
+   const ext = path.extname(file.originalname).toLowerCase();
+   // Don't trust the extension alone as proof of content, but do use it
+-  // as a first-pass reject for obviously wrong uploads.
++  // as a first-pass reject for obviously wrong uploads. Throw our own
++  // ApiError (not a plain Error) so this reaches the client through the
++  // same controlled error path as every other validation failure,
++  // rather than the generic/hardened catch-all branch.
+   if (ext !== ".eml") {
+-    cb(new Error("Only .eml files are accepted"));
++    cb(Errors.invalidFileType());
+     return;
+   }
+   cb(null, true);
+diff --git a/backend-batch3.5/backend/tests/reportBuilder.test.ts b/backend-batch3.5/backend/tests/reportBuilder.test.ts
+index 697b50c..e7657e5 100644
+--- a/backend-batch3.5/backend/tests/reportBuilder.test.ts
++++ b/backend-batch3.5/backend/tests/reportBuilder.test.ts
+@@ -318,6 +318,38 @@ describe("buildForensicReport — missing evidence", () => {
+   });
+ });
+ 
++describe("buildForensicReport — received relay chain", () => {
++  it("includes the full per-hop received chain, not just a count", () => {
++    const r = record({
++      headerAnalysis: headerAnalysis({
++        receivedChain: [
++          {
++            hop: 1,
++            fromHostname: "mail.example.com",
++            fromIp: "203.0.113.5",
++            fromIpClassification: "PUBLIC",
++            byHostname: "mx.example.org",
++            timestampRaw: "Fri, 28 Aug 2026 10:00:00 +0000",
++            timestampIso: "2026-08-28T10:00:00.000Z",
++            rawHeader: "Received: from mail.example.com by mx.example.org; Fri, 28 Aug 2026 10:00:00 +0000",
++          },
++        ],
++      }),
++    });
++    const report = buildForensicReport(r, null);
++    assert.equal(report.headerForensics.receivedHopCount, 1);
++    assert.equal(report.headerForensics.receivedChain.length, 1);
++    assert.equal(report.headerForensics.receivedChain[0].fromIp, "203.0.113.5");
++    assert.equal(report.headerForensics.receivedChain[0].fromHostname, "mail.example.com");
++  });
++
++  it("reports an empty received chain (not fabricated) when header analysis is unavailable", () => {
++    const r = record({ headerAnalysis: null });
++    const report = buildForensicReport(r, null);
++    assert.deepEqual(report.headerForensics.receivedChain, []);
++  });
++});
++
+ describe("buildForensicReport — data integrity", () => {
+   it("why-flagged is exactly the stored explanations list, never re-derived", () => {
+     const ev1: RiskEvidenceItem = {
+diff --git a/backend-batch3.5/backend/tests/scan-oversized.test.ts b/backend-batch3.5/backend/tests/scan-oversized.test.ts
+index 2db37c7..e0f5328 100644
+--- a/backend-batch3.5/backend/tests/scan-oversized.test.ts
++++ b/backend-batch3.5/backend/tests/scan-oversized.test.ts
+@@ -16,6 +16,6 @@ test("POST /emails/scan rejects a file exceeding the configured max size", async
+     .post("/api/v1/emails/scan")
+     .attach("file", oversized, "big.eml");
+ 
+-  assert.equal(res.status, 400);
++  assert.equal(res.status, 413);
+   assert.equal(res.body.error.code, "UPLOAD_ERROR");
+ });
+diff --git a/backend-batch3.5/backend/tests/security.test.ts b/backend-batch3.5/backend/tests/security.test.ts
+new file mode 100644
+index 0000000..ed030f0
+--- /dev/null
++++ b/backend-batch3.5/backend/tests/security.test.ts
+@@ -0,0 +1,112 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import fs from "fs";
++import os from "os";
++import path from "path";
++import request from "supertest";
++import { createApp } from "../src/app";
++import { resetMlModelCache } from "../src/analyzers/mlClassifier";
++
++const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "sih-security-"));
++process.env.EMAIL_DATA_DIR = dataDir;
++process.env.DNS_INTEL_ENABLED = "0";
++process.env.ML_MODEL_PATH = path.join(__dirname, "missing-ml-model.json");
++delete process.env.LLM_API_KEY;
++delete process.env.GEOIP_API_URL;
++resetMlModelCache();
++const app = createApp();
++
++function sampleEml(): Buffer {
++  return Buffer.from(
++    ["From: sender@example.com", "To: recipient@example.com", "Subject: Test scan", "", "Body.", ""].join(
++      "\r\n"
++    ),
++    "utf-8"
++  );
++}
++
++// --- emailId route param validation ---------------------------------
++
++test("GET /emails/:emailId rejects a traversal-style emailId with a clean 400, not a filesystem error", async () => {
++  const res = await request(app).get("/api/v1/emails/..%2F..%2F..%2Fetc%2Fpasswd");
++  assert.equal(res.status, 400);
++  assert.equal(res.body.error.code, "INVALID_EMAIL_ID");
++});
++
++test("GET /emails/:emailId rejects an emailId containing path separators", async () => {
++  const res = await request(app).get("/api/v1/emails/EMAIL-123%2F..%2Fsecret");
++  assert.equal(res.status, 400);
++  assert.equal(res.body.error.code, "INVALID_EMAIL_ID");
++});
++
++test("GET /emails/:emailId rejects a null-byte emailId", async () => {
++  const res = await request(app).get("/api/v1/emails/EMAIL-123%00");
++  assert.equal(res.status, 400);
++  assert.equal(res.body.error.code, "INVALID_EMAIL_ID");
++});
++
++test("GET /emails/:emailId/report also validates emailId format (shared router.param)", async () => {
++  const res = await request(app).get("/api/v1/emails/..%2F..%2Fetc/report");
++  assert.equal(res.status, 400);
++  assert.equal(res.body.error.code, "INVALID_EMAIL_ID");
++});
++
++test("GET /emails/:emailId/related also validates emailId format (shared router.param)", async () => {
++  const res = await request(app).get("/api/v1/emails/%2e%2e%2f/related");
++  assert.equal(res.status, 400);
++  assert.equal(res.body.error.code, "INVALID_EMAIL_ID");
++});
++
++test("a well-formed but nonexistent emailId still cleanly 404s (validation doesn't block real lookups)", async () => {
++  const res = await request(app).get("/api/v1/emails/EMAIL-20260101-ABCDEF");
++  assert.equal(res.status, 404);
++  assert.equal(res.body.error.code, "EMAIL_NOT_FOUND");
++});
++
++// --- malformed stored JSON --------------------------------------------
++
++test("a corrupted stored record returns a controlled 500, not a raw JSON.parse error", async () => {
++  const scanRes = await request(app).post("/api/v1/emails/scan").attach("file", sampleEml(), "corrupt.eml");
++  assert.equal(scanRes.status, 201);
++  const emailId = scanRes.body.emailId as string;
++
++  const parsedJsonPath = path.join(dataDir, emailId, "parsed.json");
++  fs.writeFileSync(parsedJsonPath, "{ this is not valid json ");
++
++  const res = await request(app).get(`/api/v1/emails/${emailId}`);
++  assert.equal(res.status, 500);
++  assert.equal(res.body.error.code, "RECORD_UNREADABLE");
++  // Must never leak the raw parser error or any filesystem path.
++  const serialized = JSON.stringify(res.body);
++  assert.ok(!serialized.includes(dataDir));
++  assert.ok(!serialized.toLowerCase().includes("unexpected token"));
++});
++
++// --- upload security ---------------------------------------------------
++
++test("non-.eml upload is rejected through the controlled ApiError path (INVALID_FILE_TYPE), not a raw Error", async () => {
++  const res = await request(app).post("/api/v1/emails/scan").attach("file", Buffer.from("hi"), "notes.txt");
++  assert.equal(res.status, 400);
++  assert.equal(res.body.error.code, "INVALID_FILE_TYPE");
++});
++
++// --- generic error handler hardening ------------------------------------
++
++test("responses never include Express's X-Powered-By header", async () => {
++  const res = await request(app).get("/api/v1/health");
++  assert.equal(res.headers["x-powered-by"], undefined);
++});
++
++test("responses include baseline safe headers", async () => {
++  const res = await request(app).get("/api/v1/health");
++  assert.equal(res.headers["x-content-type-options"], "nosniff");
++  assert.equal(res.headers["x-frame-options"], "DENY");
++});
++
++test("no response body ever contains a stack trace", async () => {
++  const res = await request(app).get("/api/v1/emails/EMAIL-DOES-NOT-EXIST-000000");
++  const serialized = JSON.stringify(res.body);
++  assert.ok(!serialized.includes("at ")); // stack frames always contain " at "
++  assert.ok(!serialized.toLowerCase().includes(".ts:"));
++  assert.ok(!serialized.toLowerCase().includes(".js:"));
++});
+diff --git a/backend-batch3.5/backend/tsconfig.json b/backend-batch3.5/backend/tsconfig.json
+index e60bf4f..ba0c32d 100644
+--- a/backend-batch3.5/backend/tsconfig.json
++++ b/backend-batch3.5/backend/tsconfig.json
+@@ -1,8 +1,8 @@
+ {
+   "compilerOptions": {
+     "target": "ES2022",
+-    "module": "CommonJS",
+-    "moduleResolution": "node",
++    "module": "Node16",
++    "moduleResolution": "node16",
+     "lib": ["ES2022"],
+     "outDir": "dist",
+     "rootDir": "src",
+-- 
+2.43.0
+

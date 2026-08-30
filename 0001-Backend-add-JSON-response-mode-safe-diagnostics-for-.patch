@@ -1,0 +1,299 @@
+From bcf83dd357975a86212559b1e607f06e95af2ac3 Mon Sep 17 00:00:00 2001
+From: Yohan <you@example.com>
+Date: Sat, 29 Aug 2026 20:33:16 +0000
+Subject: [PATCH] Backend: add JSON response mode + safe diagnostics for the
+ Gemini AI pipeline
+
+Regenerated cleanly against the current HEAD (feec12e, "Backend: fix ML
+loading and add Gemini provider") after the previous patch failed to
+apply against a stale base. Confirmed this repo's current
+llmClient.ts/aiAssessment.ts/tests/llmClient.test.ts before editing -
+no [ai-debug] logging or responseMimeType existed here yet.
+
+CONTEXT / LIMITATION UP FRONT: this sandbox has no network egress to
+generativelanguage.googleapis.com, so I could not make a live call with
+a real Gemini key and empirically observe which exact failure point is
+occurring on your machine. Rather than guess, this change makes two
+concrete improvements that address known real failure modes, and adds
+safe, targeted diagnostic logging at every stage of the pipeline, so
+your next scan (with your real key) will print exactly where it fails.
+
+Confirmed NOT the problem (traced/checked directly, no changes needed):
+  - LlmProvider interface unchanged - still exactly
+    `complete(request: LlmCompletionRequest): Promise<string>`.
+  - llmProviderFromEnv() reads LLM_PROVIDER/LLM_API_KEY/LLM_MODEL fresh
+    on every call (inside the scan route handler, not cached at module
+    load) - dotenv/import ordering is not a factor.
+  - parseLlmSemanticJson() already strips ```json fences before
+    parsing.
+  - AIAssessment's full field set (phishingIntent, credentialHarvesting,
+    financialFraud, impersonation, socialEngineering, attackType,
+    summary, recommendedActions, aiContentScore, status) is built
+    correctly and never stripped afterward - EmailRecord stores it
+    wholesale and the API response spreads the whole record.
+  - Batch 5C's separate `recommendations` field is unrelated to and
+    unaffected by AIAssessment.recommendedActions.
+  - The local ML implementation, risk engine, Batch 5C, Batch 6, and
+    frontend are untouched by this change.
+
+Two concrete fixes made (src/services/llmClient.ts):
+  1. Added `generationConfig: { responseMimeType: "application/json" }`
+     to the Gemini request - targets Gemini replying with prose or a
+     format the existing fence-stripping doesn't catch.
+  2. On a non-2xx response, now reads and logs (and includes in the
+     thrown error) Gemini's own short structured error message (e.g.
+     "API key not valid", quota errors, model-not-found) - Google's
+     diagnostic text about the request, never email content or the key.
+
+Safe temporary diagnostics added (all console.error, prefixed
+"[ai-debug]" for easy grep/removal later):
+  - llmProviderFromEnv(): "provider initialized: true/false", provider
+    type, and model name (never the API key).
+  - createGeminiProvider().complete(): the Gemini HTTP status; on
+    failure, Gemini's own error message (bounded, safe); on a
+    200-with-no-text response, the finishReason/blockReason enum labels
+    (e.g. "SAFETY") - never content.
+  - assessAi(): the raw response length and whether it looks like JSON
+    (never the text itself); "JSON parse + schema validation: OK" on
+    success; on failure, which exact stage failed (provider.complete()
+    / JSON.parse() / Zod schema validation / unexpected error) with a
+    bounded, content-free detail.
+
+Never logged: API key, email body/content, or the raw LLM response text.
+
+Files changed:
+  - src/services/llmClient.ts
+  - src/analyzers/aiAssessment.ts
+  - tests/llmClient.test.ts (2 new tests added to the existing 9:
+    responseMimeType is sent; Gemini's own error message is surfaced
+    safely on a non-2xx response)
+
+npm test: 246/246 passing (2 new, 244 baseline unchanged).
+npm run build: clean.
+
+How to verify with one fresh .eml scan:
+  1. Confirm backend-batch3.5/backend/.env has LLM_PROVIDER=gemini,
+     LLM_API_KEY=<your real key>, LLM_MODEL=gemini-2.5-flash.
+  2. Run the backend so stdout/stderr is visible (npm run dev, or
+     npm start after npm run build).
+  3. POST a fresh .eml to /api/v1/emails/scan (or use the Scanner UI).
+  4. Watch the terminal for lines starting with "[ai-debug]":
+       [ai-debug] provider initialized: true | provider: gemini | model: gemini-2.5-flash
+       [ai-debug] Gemini HTTP status: <code>
+     - If status is not 200: the next line is Gemini's own error
+       message (e.g. "API key not valid", "quota exceeded", a 404 for
+       an invalid/retired model name) - tells you the exact fix.
+     - If status is 200: next you'll see either
+       "LLM raw response length: N | starts with '{': true/false" then
+       "JSON parse + schema validation: OK" (success), or a line naming
+       exactly which stage failed with a bounded reason.
+  5. GET /api/v1/emails/:emailId and confirm aiAssessment.status is
+     "AVAILABLE" with the full field set populated from a genuine
+     model response (not fabricated).
+  6. Once confirmed working, the "[ai-debug]" lines can be removed or
+     left in place (safe to run anywhere - status codes, boolean
+     checks, and Google's own error strings only).
+---
+ .../backend/src/analyzers/aiAssessment.ts     | 27 +++++++++-
+ .../backend/src/services/llmClient.ts         | 54 ++++++++++++++++---
+ .../backend/tests/llmClient.test.ts           | 30 +++++++++++
+ 3 files changed, 104 insertions(+), 7 deletions(-)
+
+diff --git a/backend-batch3.5/backend/src/analyzers/aiAssessment.ts b/backend-batch3.5/backend/src/analyzers/aiAssessment.ts
+index 56e1d1d..c4875f7 100644
+--- a/backend-batch3.5/backend/src/analyzers/aiAssessment.ts
++++ b/backend-batch3.5/backend/src/analyzers/aiAssessment.ts
+@@ -99,7 +99,17 @@ export async function assessAi(options: {
+       system: SYSTEM_PROMPT,
+       user: buildLlmUserPayload(options),
+     });
++
++    // TEMPORARY SAFE DIAGNOSTIC — length and a structural shape check
++    // only, never the actual response text (the model's summary can
++    // echo fragments of the email, so treat it the same as email
++    // content for logging purposes).
++    console.error(
++      `[ai-debug] LLM raw response length: ${raw.length} | starts with '{': ${raw.trim().startsWith("{")}`
++    );
++
+     const parsed = parseLlmSemanticJson(raw);
++    console.error("[ai-debug] JSON parse + schema validation: OK");
+     const score = aiContentScore(parsed);
+     const aiAssessment: AIAssessment = {
+       emailId,
+@@ -136,15 +146,30 @@ export async function assessAi(options: {
+ 
+     return { aiAssessment, evidence };
+   } catch (err) {
++    // TEMPORARY SAFE DIAGNOSTIC — error type/name and a bounded,
++    // content-free message only. Zod issue messages describe schema
++    // shape problems (e.g. "phishingIntent: Expected number, received
++    // string"), never email content, so a truncated summary is safe.
+     if (err instanceof TimeoutError) {
++      console.error("[ai-debug] assessAi failed at: provider.complete() — request timed out");
+       return { aiAssessment: unavailableAi(emailId, "ERROR"), evidence: [] };
+     }
+     if (err instanceof LlmUnavailableError) {
++      console.error(`[ai-debug] assessAi failed at: provider.complete() — ${err.message}`);
++      return { aiAssessment: unavailableAi(emailId, "UNAVAILABLE"), evidence: [] };
++    }
++    if (err instanceof SyntaxError) {
++      console.error(`[ai-debug] assessAi failed at: JSON.parse() — ${err.message}`);
+       return { aiAssessment: unavailableAi(emailId, "UNAVAILABLE"), evidence: [] };
+     }
+-    if (err instanceof SyntaxError || err instanceof ZodError) {
++    if (err instanceof ZodError) {
++      const issues = err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ").slice(0, 300);
++      console.error(`[ai-debug] assessAi failed at: schema validation — ${issues}`);
+       return { aiAssessment: unavailableAi(emailId, "UNAVAILABLE"), evidence: [] };
+     }
++    console.error(
++      `[ai-debug] assessAi failed at: unexpected error — ${err instanceof Error ? err.constructor.name + ": " + err.message : String(err)}`
++    );
+     return { aiAssessment: unavailableAi(emailId, "UNAVAILABLE"), evidence: [] };
+   }
+ }
+diff --git a/backend-batch3.5/backend/src/services/llmClient.ts b/backend-batch3.5/backend/src/services/llmClient.ts
+index 8e1fb68..5473a94 100644
+--- a/backend-batch3.5/backend/src/services/llmClient.ts
++++ b/backend-batch3.5/backend/src/services/llmClient.ts
+@@ -88,21 +88,54 @@ export function createGeminiProvider(options: {
+           body: JSON.stringify({
+             systemInstruction: { parts: [{ text: request.system }] },
+             contents: [{ role: "user", parts: [{ text: request.user }] }],
++            // Ask Gemini to reply with a bare JSON body (supported by the
++            // v1beta generateContent API) so we don't depend solely on
++            // parseLlmSemanticJson's markdown-fence stripping to recover
++            // valid JSON from a prose or fenced-code-block reply.
++            generationConfig: { responseMimeType: "application/json" },
+           }),
+         },
+         timeoutMs,
+         fetchImpl
+       );
+ 
++      // TEMPORARY SAFE DIAGNOSTIC — status code only, never the request/
++      // response body, never the API key. Remove once Gemini responses
++      // are confirmed reliably AVAILABLE.
++      console.error(`[ai-debug] Gemini HTTP status: ${res.status}`);
++
+       if (!res.ok) {
+-        throw new LlmUnavailableError(`LLM HTTP ${res.status}`);
++        // Gemini error bodies are Google's own structured diagnostic text
++        // about the request (e.g. "API key not valid", "quota exceeded",
++        // "model not found") — never the caller's email content — so a
++        // short bounded excerpt is safe to surface here.
++        let safeDetail = "";
++        try {
++          const errBody = (await res.json()) as { error?: { message?: string; status?: string } };
++          safeDetail = errBody.error?.message?.slice(0, 200) ?? "";
++        } catch {
++          // Body wasn't JSON — nothing more to safely extract.
++        }
++        console.error(`[ai-debug] Gemini error detail: ${safeDetail || "(no structured error body)"}`);
++        throw new LlmUnavailableError(`LLM HTTP ${res.status}${safeDetail ? `: ${safeDetail}` : ""}`);
+       }
+ 
+       const body = (await res.json()) as {
+-        candidates?: { content?: { parts?: { text?: string }[] } }[];
++        candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
++        promptFeedback?: { blockReason?: string };
+       };
+       const text = body.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text;
+-      if (!text) throw new LlmUnavailableError("LLM returned no text content.");
++      if (!text) {
++        // Safe to log: finishReason/blockReason are Gemini's own enum
++        // labels (e.g. "SAFETY", "MAX_TOKENS", "RECITATION"), never
++        // content.
++        const finishReason = body.candidates?.[0]?.finishReason;
++        const blockReason = body.promptFeedback?.blockReason;
++        console.error(
++          `[ai-debug] Gemini returned no usable text — finishReason: ${finishReason ?? "none"}, blockReason: ${blockReason ?? "none"}`
++        );
++        throw new LlmUnavailableError("LLM returned no text content.");
++      }
+       return text;
+     },
+   };
+@@ -119,14 +152,21 @@ export function createGeminiProvider(options: {
+ // LLM_MODEL explicitly (e.g. "gemini-2.5-flash") when using Gemini.
+ export function llmProviderFromEnv(): LlmProvider | null {
+   const apiKey = process.env.LLM_API_KEY?.trim();
+-  if (!apiKey) return null;
++  if (!apiKey) {
++    console.error("[ai-debug] provider initialized: false (no LLM_API_KEY configured)");
++    return null;
++  }
+ 
+   const provider = (process.env.LLM_PROVIDER?.trim().toLowerCase() || "anthropic");
+   const timeoutMs = Number(process.env.LLM_TIMEOUT_MS ?? 15000);
+ 
+   if (provider === "gemini") {
+     const model = process.env.LLM_MODEL?.trim();
+-    if (!model) return null; // no safe default — require an explicit, current model name
++    if (!model) {
++      console.error("[ai-debug] provider initialized: false (LLM_PROVIDER=gemini but LLM_MODEL is not set)");
++      return null; // no safe default — require an explicit, current model name
++    }
++    console.error(`[ai-debug] provider initialized: true | provider: gemini | model: ${model}`);
+     return createGeminiProvider({
+       apiKey,
+       model,
+@@ -135,10 +175,12 @@ export function llmProviderFromEnv(): LlmProvider | null {
+     });
+   }
+ 
++  const model = process.env.LLM_MODEL?.trim() || "claude-haiku-4-5-20251001";
++  console.error(`[ai-debug] provider initialized: true | provider: anthropic | model: ${model}`);
+   return createAnthropicProvider({
+     apiKey,
+     apiUrl: process.env.LLM_API_URL?.trim() || "https://api.anthropic.com/v1/messages",
+-    model: process.env.LLM_MODEL?.trim() || "claude-haiku-4-5-20251001",
++    model,
+     timeoutMs,
+   });
+ }
+diff --git a/backend-batch3.5/backend/tests/llmClient.test.ts b/backend-batch3.5/backend/tests/llmClient.test.ts
+index 93e665b..21ddd0e 100644
+--- a/backend-batch3.5/backend/tests/llmClient.test.ts
++++ b/backend-batch3.5/backend/tests/llmClient.test.ts
+@@ -118,6 +118,36 @@ test("createGeminiProvider throws when the response has no usable text", async (
+   await assert.rejects(() => provider.complete({ system: "s", user: "u" }));
+ });
+ 
++test("createGeminiProvider requests JSON response mode via generationConfig.responseMimeType", async () => {
++  let capturedBody: any = null;
++  const fetchImpl = (async (_url: string, init: RequestInit) => {
++    capturedBody = JSON.parse(init.body as string);
++    return {
++      ok: true,
++      status: 200,
++      json: async () => ({ candidates: [{ content: { parts: [{ text: "{}" }] } }] }),
++    } as Response;
++  }) as typeof fetch;
++
++  const provider = createGeminiProvider({ apiKey: "k", model: "gemini-2.5-flash", fetchImpl });
++  await provider.complete({ system: "s", user: "u" });
++
++  assert.equal(capturedBody.generationConfig?.responseMimeType, "application/json");
++});
++
++test("createGeminiProvider surfaces Gemini's own error message on a non-2xx response (safe — no secrets/content)", async () => {
++  const fetchImpl = fakeFetch(403, { error: { message: "API key not valid. Please pass a valid API key.", status: "PERMISSION_DENIED" } });
++  const provider = createGeminiProvider({ apiKey: "k", model: "gemini-2.5-flash", fetchImpl });
++  await assert.rejects(
++    () => provider.complete({ system: "s", user: "u" }),
++    (err: Error) => {
++      assert.ok(err.message.includes("403"));
++      assert.ok(err.message.includes("API key not valid"));
++      return true;
++    }
++  );
++});
++
+ test("createGeminiProvider respects an overridden apiBaseUrl without hardcoding it", async () => {
+   let capturedUrl = "";
+   const fetchImpl = (async (url: string) => {
+-- 
+2.43.0
+

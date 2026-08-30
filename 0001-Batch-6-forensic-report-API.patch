@@ -1,0 +1,1008 @@
+From d1f2a73bc41b94f487bc5d8103539ea524d67dd6 Mon Sep 17 00:00:00 2001
+From: Yohan <you@example.com>
+Date: Fri, 28 Aug 2026 18:57:49 +0000
+Subject: [PATCH] Batch 6: forensic report API
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- GET /api/v1/emails/:emailId/report now returns a full print-friendly
+  structured report built from stored EmailRecord data (case info,
+  evidence integrity, email metadata, authentication, header forensics,
+  threat assessment, IOCs, URL/domain analysis, infrastructure/geoloc,
+  ML/AI assessment, why-flagged, recommended actions (reuses Batch 5C),
+  related-campaign info (reuses Batch 5B), and the two required
+  limitation strings) — no PDF generation; frontend uses browser print
+- reportBuilder.ts: pure projection, never re-runs parsers/ML/LLM/GeoIP/
+  DNS, marks each section UNAVAILABLE/NOT_APPLICABLE rather than
+  fabricating content when its source data is missing
+- 404 EMAIL_NOT_FOUND preserved for nonexistent emailId
+- updated two pre-Batch-6 placeholder tests (scan.test.ts,
+  scan-batch5.test.ts) that asserted the old 'not implemented yet' 404,
+  since that behavior is now intentionally replaced
+- 19 new tests (reportBuilder.test.ts, emails-report.test.ts),
+  230/230 passing
+- npm run build clean
+---
+ .../backend/src/analyzers/reportBuilder.ts    | 377 ++++++++++++++++++
+ backend-batch3.5/backend/src/routes/emails.ts |  12 +-
+ .../backend/tests/emails-report.test.ts       | 139 +++++++
+ .../backend/tests/reportBuilder.test.ts       | 356 +++++++++++++++++
+ .../backend/tests/scan-batch5.test.ts         |  10 +-
+ backend-batch3.5/backend/tests/scan.test.ts   |   6 +-
+ 6 files changed, 891 insertions(+), 9 deletions(-)
+ create mode 100644 backend-batch3.5/backend/src/analyzers/reportBuilder.ts
+ create mode 100644 backend-batch3.5/backend/tests/emails-report.test.ts
+ create mode 100644 backend-batch3.5/backend/tests/reportBuilder.test.ts
+
+diff --git a/backend-batch3.5/backend/src/analyzers/reportBuilder.ts b/backend-batch3.5/backend/src/analyzers/reportBuilder.ts
+new file mode 100644
+index 0000000..60dabb1
+--- /dev/null
++++ b/backend-batch3.5/backend/src/analyzers/reportBuilder.ts
+@@ -0,0 +1,377 @@
++import type {
++  EmailAddress,
++  EmailRecord,
++  Recommendation,
++  RelatedEmailsResponse,
++} from "../schemas/types";
++import { generateRecommendations } from "./recommendations";
++
++// Batch 6 — print-friendly, structured forensic report for one stored
++// email. Pure projection: reuses stored EmailRecord data (plus a fresh,
++// cheap Batch 5B correlation check and Batch 5C recommendations) — never
++// re-runs parsing, ML, LLM, GeoIP, or DNS, and is not itself persisted
++// as a second dataset. The frontend renders this and uses the browser's
++// Print → Save as PDF; no PDF generation happens here.
++
++export const GEOLOCATION_LIMITATION =
++  "Geolocation represents probable network infrastructure and does not establish attacker identity or physical location.";
++export const THREAT_SCORE_LIMITATION =
++  "Threat scores are analytical risk assessments and are not legal conclusions.";
++
++export interface ReportCaseInformation {
++  emailId: string;
++  caseId: string | null;
++  filename: string;
++  generatedAt: string;
++}
++
++export interface ReportEvidenceIntegrity {
++  sha256: string;
++  fileSizeBytes: number;
++  collectedAt: string;
++  storagePath: string;
++  note: string;
++}
++
++export interface ReportEmailMetadata {
++  subject: string | null;
++  from: EmailAddress[];
++  to: EmailAddress[];
++  date: string | null;
++  messageId: string | null;
++  attachmentCount: number;
++  status: "AVAILABLE" | "UNAVAILABLE";
++}
++
++export interface ReportAuthentication {
++  spf: { result: string; raw: string | null } | null;
++  dkim: { result: string; raw: string | null } | null;
++  dmarc: { result: string; policy: string | null; raw: string | null } | null;
++  status: "AVAILABLE" | "UNAVAILABLE";
++}
++
++export interface ReportHeaderForensics {
++  status: string;
++  anomalyCount: number;
++  anomalies: { type: string; severity: string; message: string; provenance: string }[];
++  receivedHopCount: number;
++}
++
++export interface ReportThreatAssessment {
++  score: number | null;
++  level: string | null;
++  classification: string | null;
++  confidence: number | null;
++  evidenceCoverage: number | null;
++  categoryScores: Record<string, { score: number | null; status: string }> | null;
++  status: "AVAILABLE" | "INSUFFICIENT_EVIDENCE";
++}
++
++export interface ReportIocs {
++  ips: string[];
++  domains: string[];
++  urls: string[];
++  hashes: string[];
++  emails: string[];
++  status: "AVAILABLE" | "UNAVAILABLE";
++}
++
++export interface ReportUrlDomainAnalysis {
++  urls: { url: string; hostname: string; riskNotes: string[] }[];
++  domains: { domain: string; lookalikeOf: string | null; similarityScore: number | null }[];
++  status: "AVAILABLE" | "NOT_APPLICABLE" | "UNAVAILABLE";
++}
++
++export interface ReportInfrastructure {
++  candidateIp: string | null;
++  country: string | null;
++  region: string | null;
++  city: string | null;
++  isp: string | null;
++  asn: string | null;
++  confidence: number | null;
++  status: string;
++  interpretation: string | null;
++}
++
++export interface ReportMlAiAssessment {
++  ml: {
++    model: string | null;
++    modelVersion: string | null;
++    classification: string | null;
++    probability: number | null;
++    status: string;
++  } | null;
++  ai: {
++    status: string;
++    attackType: string | null;
++    summary: string | null;
++    phishingIntent: number | null;
++    credentialHarvesting: number | null;
++    financialFraud: number | null;
++    impersonation: number | null;
++    socialEngineering: number | null;
++    malwareDelivery: number | null;
++    aiContentScore: number | null;
++    provenance: string;
++  } | null;
++}
++
++export interface ReportWhyFlaggedItem {
++  type: string;
++  severity: string;
++  category: string;
++  message: string;
++  provenance: string;
++  weight: number;
++}
++
++export interface ReportRelatedCampaign {
++  campaignId: string | null;
++  confidence: number;
++  relatedEmailIds: string[];
++  sharedIndicators: string[];
++  sharedInfrastructure: string[];
++  reasons: string[];
++  available: boolean;
++}
++
++export interface ForensicReportContent {
++  emailId: string;
++  generatedAt: string;
++  caseInformation: ReportCaseInformation;
++  evidenceIntegrity: ReportEvidenceIntegrity;
++  emailMetadata: ReportEmailMetadata;
++  authentication: ReportAuthentication;
++  headerForensics: ReportHeaderForensics;
++  threatAssessment: ReportThreatAssessment;
++  iocs: ReportIocs;
++  urlDomainAnalysis: ReportUrlDomainAnalysis;
++  infrastructure: ReportInfrastructure | null;
++  mlAiAssessment: ReportMlAiAssessment;
++  whyFlagged: ReportWhyFlaggedItem[];
++  recommendedActions: Recommendation[];
++  relatedCampaign: ReportRelatedCampaign;
++  limitations: string[];
++}
++
++/**
++ * Builds the full structured report for one already-scanned EmailRecord.
++ * `relatedEmails` is an optional pre-computed Batch 5B correlation
++ * result — supplying it keeps this a pure function of data the caller
++ * already has (mirrors recommendations.ts) and keeps it independently
++ * testable without a full stored-email corpus. When omitted, the
++ * related-campaign section is reported as unavailable rather than
++ * silently empty, so the report never implies "checked, found nothing"
++ * when it simply wasn't checked.
++ */
++export function buildForensicReport(
++  record: EmailRecord,
++  relatedEmails: RelatedEmailsResponse | null = null
++): ForensicReportContent {
++  const generatedAt = new Date().toISOString();
++  const risk = record.risk;
++  const parsed = record.parsedEmail;
++  const infra = record.infrastructure;
++  const ml = record.mlAssessment ?? null;
++  const ai = record.aiAssessment;
++
++  const recommendedActions = generateRecommendations(record, relatedEmails);
++
++  return {
++    emailId: record.emailId,
++    generatedAt,
++
++    caseInformation: {
++      emailId: record.emailId,
++      caseId: record.caseId,
++      filename: record.evidence.filename,
++      generatedAt,
++    },
++
++    evidenceIntegrity: {
++      sha256: record.evidence.sha256,
++      fileSizeBytes: record.evidence.fileSizeBytes,
++      collectedAt: record.evidence.createdAt,
++      storagePath: record.evidence.storagePath,
++      note: "SHA-256 computed over the exact raw bytes as uploaded, before any parsing — preserved untouched as evidence.",
++    },
++
++    emailMetadata: parsed
++      ? {
++          subject: parsed.subject,
++          from: parsed.from,
++          to: parsed.to,
++          date: parsed.date,
++          messageId: parsed.messageId,
++          attachmentCount: parsed.attachments.length,
++          status: "AVAILABLE",
++        }
++      : {
++          subject: null,
++          from: [],
++          to: [],
++          date: null,
++          messageId: null,
++          attachmentCount: 0,
++          status: "UNAVAILABLE",
++        },
++
++    authentication: record.authentication
++      ? {
++          spf: record.authentication.spf,
++          dkim: record.authentication.dkim,
++          dmarc: record.authentication.dmarc,
++          status: "AVAILABLE",
++        }
++      : { spf: null, dkim: null, dmarc: null, status: "UNAVAILABLE" },
++
++    headerForensics: record.headerAnalysis
++      ? {
++          status: record.headerAnalysis.status,
++          anomalyCount: record.headerAnalysis.anomalies.length,
++          anomalies: record.headerAnalysis.anomalies.map((a) => ({
++            type: a.type,
++            severity: a.severity,
++            message: a.message,
++            provenance: a.provenance,
++          })),
++          receivedHopCount: record.headerAnalysis.receivedChain.length,
++        }
++      : { status: "UNAVAILABLE", anomalyCount: 0, anomalies: [], receivedHopCount: 0 },
++
++    threatAssessment: risk
++      ? {
++          score: risk.score,
++          level: risk.level,
++          classification: risk.classification,
++          confidence: risk.confidence,
++          evidenceCoverage: risk.evidenceCoverage,
++          categoryScores: risk.categoryScores
++            ? Object.fromEntries(
++                Object.entries(risk.categoryScores).map(([cat, result]) => [
++                  cat,
++                  { score: result.score, status: result.status },
++                ])
++              )
++            : null,
++          status: risk.score === null ? "INSUFFICIENT_EVIDENCE" : "AVAILABLE",
++        }
++      : {
++          score: null,
++          level: null,
++          classification: null,
++          confidence: null,
++          evidenceCoverage: null,
++          categoryScores: null,
++          status: "INSUFFICIENT_EVIDENCE",
++        },
++
++    iocs: record.iocs
++      ? {
++          ips: record.iocs.ips,
++          domains: record.iocs.domains,
++          urls: record.iocs.urls,
++          hashes: record.iocs.hashes,
++          emails: record.iocs.emails,
++          status: "AVAILABLE",
++        }
++      : { ips: [], domains: [], urls: [], hashes: [], emails: [], status: "UNAVAILABLE" },
++
++    urlDomainAnalysis: {
++      urls: (record.urlAnalysis?.urls ?? []).map((u) => ({
++        url: u.url,
++        hostname: u.hostname,
++        riskNotes: u.riskNotes,
++      })),
++      domains: (record.domainAnalysis?.domains ?? []).map((d) => ({
++        domain: d.domain,
++        lookalikeOf: d.lookalikeOf,
++        similarityScore: d.similarityScore,
++      })),
++      status:
++        record.urlAnalysis || record.domainAnalysis
++          ? (record.iocs?.urls.length ?? 0) > 0 || (record.iocs?.domains.length ?? 0) > 0
++            ? "AVAILABLE"
++            : "NOT_APPLICABLE"
++          : "UNAVAILABLE",
++    },
++
++    infrastructure: infra
++      ? {
++          candidateIp: infra.candidateIp,
++          country: infra.country,
++          region: infra.region,
++          city: infra.city,
++          isp: infra.isp,
++          asn: infra.asn,
++          confidence: infra.confidence,
++          status: infra.status,
++          interpretation: infra.interpretation,
++        }
++      : null,
++
++    mlAiAssessment: {
++      ml: ml
++        ? {
++            model: ml.model,
++            modelVersion: ml.modelVersion,
++            classification: ml.classification,
++            probability: ml.probability,
++            status: ml.status,
++          }
++        : null,
++      ai: ai
++        ? {
++            status: ai.status,
++            attackType: ai.attackType,
++            summary: ai.summary,
++            phishingIntent: ai.phishingIntent,
++            credentialHarvesting: ai.credentialHarvesting,
++            financialFraud: ai.financialFraud,
++            impersonation: ai.impersonation,
++            socialEngineering: ai.socialEngineering,
++            malwareDelivery: ai.malwareDelivery,
++            aiContentScore: ai.aiContentScore,
++            provenance: ai.provenance,
++          }
++        : null,
++    },
++
++    // "Why flagged" is the same flat evidence list the risk score itself
++    // was computed from — never a re-derivation, so it can't drift from
++    // the score above it.
++    whyFlagged: (record.explanations ?? []).map((e) => ({
++      type: e.type,
++      severity: e.severity,
++      category: e.category,
++      message: e.message,
++      provenance: e.provenance,
++      weight: e.weight,
++    })),
++
++    recommendedActions,
++
++    relatedCampaign: relatedEmails
++      ? {
++          campaignId: relatedEmails.campaignId,
++          confidence: relatedEmails.confidence,
++          relatedEmailIds: relatedEmails.relatedEmailIds,
++          sharedIndicators: relatedEmails.sharedIndicators,
++          sharedInfrastructure: relatedEmails.sharedInfrastructure,
++          reasons: relatedEmails.reasons,
++          available: true,
++        }
++      : {
++          campaignId: null,
++          confidence: 0,
++          relatedEmailIds: [],
++          sharedIndicators: [],
++          sharedInfrastructure: [],
++          reasons: [],
++          available: false,
++        },
++
++    limitations: [GEOLOCATION_LIMITATION, THREAT_SCORE_LIMITATION],
++  };
++}
+diff --git a/backend-batch3.5/backend/src/routes/emails.ts b/backend-batch3.5/backend/src/routes/emails.ts
+index 8d8f0a0..5179b42 100644
+--- a/backend-batch3.5/backend/src/routes/emails.ts
++++ b/backend-batch3.5/backend/src/routes/emails.ts
+@@ -17,6 +17,7 @@ import { analyzeInfrastructure } from "../analyzers/infrastructure";
+ import { buildInfrastructureGraph } from "../analyzers/infrastructureGraph";
+ import { correlateEmail } from "../analyzers/correlation";
+ import { generateRecommendations } from "../analyzers/recommendations";
++import { buildForensicReport } from "../analyzers/reportBuilder";
+ import { geoIpProviderFromEnv } from "../services/geoipClient";
+ import { dnsProviderFromEnv } from "../services/dnsClient";
+ import { llmProviderFromEnv } from "../services/llmClient";
+@@ -255,15 +256,20 @@ emailsRouter.get(
+   }
+ );
+ 
+-// GET /api/v1/emails/:emailId/report — placeholder until Batch 6.
++// GET /api/v1/emails/:emailId/report — Batch 6: print-friendly, structured
++// forensic report. Built entirely from the stored EmailRecord (plus a
++// fresh, cheap Batch 5B correlation check) — never re-runs parsers, ML,
++// LLM, GeoIP, or DNS. No PDF is generated server-side; the frontend uses
++// the browser's Print → Save as PDF against this structured content.
+ emailsRouter.get(
+   "/emails/:emailId/report",
+   async (req: Request, res: Response, next: NextFunction) => {
+     try {
+       const record = await getEmailRecord(req.params.emailId);
+       if (!record) throw Errors.emailNotFound(req.params.emailId);
+-      if (!record.report) throw Errors.reportNotAvailable(req.params.emailId);
+-      return res.status(200).json(record.report);
++      const allRecords = await listAllEmailRecords();
++      const relatedEmails = correlateEmail(record, allRecords);
++      return res.status(200).json(buildForensicReport(record, relatedEmails));
+     } catch (err) {
+       return next(err);
+     }
+diff --git a/backend-batch3.5/backend/tests/emails-report.test.ts b/backend-batch3.5/backend/tests/emails-report.test.ts
+new file mode 100644
+index 0000000..b4a0cdb
+--- /dev/null
++++ b/backend-batch3.5/backend/tests/emails-report.test.ts
+@@ -0,0 +1,139 @@
++import { describe, it } from "node:test";
++import assert from "node:assert/strict";
++import fs from "fs";
++import os from "os";
++import path from "path";
++import request from "supertest";
++import { createApp } from "../src/app";
++import { resetMlModelCache } from "../src/analyzers/mlClassifier";
++
++const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "sih-report-"));
++process.env.EMAIL_DATA_DIR = dataDir;
++process.env.DNS_INTEL_ENABLED = "0";
++process.env.ML_MODEL_PATH = path.join(__dirname, "missing-ml-model.json");
++delete process.env.LLM_API_KEY;
++delete process.env.GEOIP_API_URL;
++resetMlModelCache();
++const app = createApp();
++
++function eml(fields: { from: string; to: string; subject: string; body: string }): Buffer {
++  return Buffer.from(
++    [
++      `From: ${fields.from}`,
++      `To: ${fields.to}`,
++      `Subject: ${fields.subject}`,
++      "",
++      fields.body,
++      "",
++    ].join("\r\n"),
++    "utf-8"
++  );
++}
++
++async function scan(fields: { from: string; to: string; subject: string; body: string }, filename: string, caseId?: string) {
++  const req = request(app).post("/api/v1/emails/scan").attach("file", eml(fields), filename);
++  const res = caseId ? await req.field("caseId", caseId) : await req;
++  assert.equal(res.status, 201);
++  return res.body.emailId as string;
++}
++
++describe("GET /emails/:emailId/report", { concurrency: false }, () => {
++  it("returns 404 EMAIL_NOT_FOUND (preserving the existing error format) for a nonexistent emailId", async () => {
++    const res = await request(app).get("/api/v1/emails/EMAIL-DOES-NOT-EXIST/report");
++    assert.equal(res.status, 404);
++    assert.equal(res.body.error.code, "EMAIL_NOT_FOUND");
++    assert.ok(res.body.error.message);
++  });
++
++  it("returns a full structured report for a scanned phishing email, including caseId, SHA-256, and limitations", async () => {
++    const id = await scan(
++      {
++        from: '"PayPal" <alert@paypa1-secure-login.com>',
++        to: "victim@example.org",
++        subject: "Urgent: verify your account or it will be suspended",
++        body: '<a href="http://paypa1-secure-login.com/verify">click here now</a>',
++      },
++      "phish.eml",
++      "CASE-42"
++    );
++
++    const res = await request(app).get(`/api/v1/emails/${id}/report`);
++    assert.equal(res.status, 200);
++    assert.equal(res.body.emailId, id);
++    assert.equal(res.body.caseInformation.caseId, "CASE-42");
++    assert.equal(res.body.evidenceIntegrity.sha256.length, 64);
++    assert.ok(res.body.evidenceIntegrity.collectedAt);
++    assert.ok(Array.isArray(res.body.limitations));
++    assert.ok(
++      res.body.limitations.includes(
++        "Geolocation represents probable network infrastructure and does not establish attacker identity or physical location."
++      )
++    );
++    assert.ok(
++      res.body.limitations.includes(
++        "Threat scores are analytical risk assessments and are not legal conclusions."
++      )
++    );
++    assert.ok(Array.isArray(res.body.whyFlagged));
++    assert.ok(Array.isArray(res.body.recommendedActions));
++    assert.ok(res.body.threatAssessment);
++    assert.ok(res.body.relatedCampaign);
++  });
++
++  it("includes related-campaign evidence in the report once a second, evidence-sharing email is scanned", async () => {
++    const idA = await scan(
++      {
++        from: "x@shared-report-example.com",
++        to: "v1@example.org",
++        subject: "Invoice attached",
++        body: '<a href="http://shared-report-example.com/pay">pay</a>',
++      },
++      "r1.eml"
++    );
++    await scan(
++      {
++        from: "x@shared-report-example.com",
++        to: "v2@example.org",
++        subject: "Invoice attached",
++        body: '<a href="http://shared-report-example.com/pay">pay</a>',
++      },
++      "r2.eml"
++    );
++
++    const res = await request(app).get(`/api/v1/emails/${idA}/report`);
++    assert.equal(res.status, 200);
++    assert.equal(res.body.relatedCampaign.available, true);
++    assert.ok(res.body.relatedCampaign.relatedEmailIds.length > 0);
++  });
++
++  it("returns a report with no caseId for an email scanned without one", async () => {
++    const id = await scan(
++      {
++        from: "newsletter@distinct-report-example.com",
++        to: "subscriber@example.org",
++        subject: "Weekly digest",
++        body: "Nothing shared with anyone else here.",
++      },
++      "no-case.eml"
++    );
++
++    const res = await request(app).get(`/api/v1/emails/${id}/report`);
++    assert.equal(res.status, 200);
++    assert.equal(res.body.caseInformation.caseId, null);
++  });
++
++  it("response is plain JSON, not a PDF binary", async () => {
++    const id = await scan(
++      {
++        from: "sender@example.com",
++        to: "recipient@example.com",
++        subject: "Hello",
++        body: "Just a normal email.",
++      },
++      "plain.eml"
++    );
++    const res = await request(app).get(`/api/v1/emails/${id}/report`);
++    assert.equal(res.status, 200);
++    assert.match(res.headers["content-type"] ?? "", /json/);
++  });
++});
+diff --git a/backend-batch3.5/backend/tests/reportBuilder.test.ts b/backend-batch3.5/backend/tests/reportBuilder.test.ts
+new file mode 100644
+index 0000000..697b50c
+--- /dev/null
++++ b/backend-batch3.5/backend/tests/reportBuilder.test.ts
+@@ -0,0 +1,356 @@
++import { describe, it } from "node:test";
++import assert from "node:assert/strict";
++import {
++  buildForensicReport,
++  GEOLOCATION_LIMITATION,
++  THREAT_SCORE_LIMITATION,
++} from "../src/analyzers/reportBuilder";
++import type {
++  AuthenticationAnalysis,
++  DomainAnalysis,
++  EmailRecord,
++  HeaderAnalysis,
++  InfrastructureAssessment,
++  IOCSet,
++  MLAssessment,
++  ParsedEmail,
++  RelatedEmailsResponse,
++  RiskAssessment,
++  RiskEvidenceItem,
++} from "../src/schemas/types";
++
++function parsedEmail(emailId: string, extras?: Partial<ParsedEmail>): ParsedEmail {
++  return {
++    emailId,
++    subject: "Test subject",
++    from: [{ displayName: null, email: "a@example.com", localPart: "a", domain: "example.com" }],
++    to: [{ displayName: null, email: "victim@example.org", localPart: "victim", domain: "example.org" }],
++    cc: [],
++    bcc: [],
++    replyTo: [],
++    returnPath: [],
++    date: "2026-08-28T00:00:00.000Z",
++    messageId: "<abc@example.com>",
++    headers: { normalized: {}, raw: [] },
++    body: { text: "hello", html: null },
++    attachments: [],
++    ...extras,
++  };
++}
++
++function categoryResult(status: "AVAILABLE" | "NOT_APPLICABLE" | "UNAVAILABLE", score: number | null, evidence: RiskEvidenceItem[] = []) {
++  return { score: status === "AVAILABLE" ? score : null, status, evidence };
++}
++
++function risk(overrides: Partial<RiskAssessment> = {}): RiskAssessment {
++  return {
++    emailId: "EMAIL-A",
++    categoryScores: {
++      technical: categoryResult("AVAILABLE", 0),
++      identity: categoryResult("AVAILABLE", 0),
++      urlDomain: categoryResult("AVAILABLE", 0),
++      content: categoryResult("AVAILABLE", 0),
++      infrastructure: categoryResult("AVAILABLE", 0),
++    },
++    score: 10,
++    level: "low",
++    classification: "legitimate",
++    confidence: 0.4,
++    evidenceCoverage: 1,
++    ...overrides,
++  };
++}
++
++function auth(overrides: Partial<AuthenticationAnalysis> = {}): AuthenticationAnalysis {
++  return {
++    emailId: "EMAIL-A",
++    spf: { result: "pass", raw: "v=spf1 pass" },
++    dkim: { result: "pass", raw: "d=example.com" },
++    dmarc: { result: "pass", policy: "reject", raw: "p=reject" },
++    ...overrides,
++  };
++}
++
++function headerAnalysis(overrides: Partial<HeaderAnalysis> = {}): HeaderAnalysis {
++  return { emailId: "EMAIL-A", anomalies: [], receivedChain: [], status: "VERIFIED", ...overrides };
++}
++
++function iocs(overrides: Partial<IOCSet> = {}): IOCSet {
++  return { emailId: "EMAIL-A", ips: [], domains: [], urls: [], hashes: [], emails: [], ...overrides };
++}
++
++function domainAnalysis(domains: DomainAnalysis["domains"]): DomainAnalysis {
++  return { emailId: "EMAIL-A", domains };
++}
++
++function infra(overrides: Partial<InfrastructureAssessment> = {}): InfrastructureAssessment {
++  return {
++    emailId: "EMAIL-A",
++    candidateIp: null,
++    country: null,
++    region: null,
++    city: null,
++    isp: null,
++    asn: null,
++    confidence: null,
++    status: "AVAILABLE",
++    ipIntelligence: [],
++    domainIntelligence: [],
++    interpretation: "probable_infrastructure",
++    ...overrides,
++  };
++}
++
++function mlAssessment(overrides: Partial<MLAssessment> = {}): MLAssessment {
++  return {
++    emailId: "EMAIL-A",
++    model: "tfidf-logistic-v1",
++    modelVersion: "1.0.0",
++    classification: "legitimate",
++    probability: 0.1,
++    status: "AVAILABLE",
++    ...overrides,
++  };
++}
++
++function related(overrides: Partial<RelatedEmailsResponse> = {}): RelatedEmailsResponse {
++  return {
++    emailId: "EMAIL-A",
++    campaignId: "CMP-ABCD1234",
++    confidence: 0.6,
++    relatedEmailIds: ["EMAIL-B"],
++    sharedIndicators: ["SHARED_DOMAIN:evil.example"],
++    sharedInfrastructure: [],
++    reasons: ["Likely Related Campaign CMP-ABCD1234: 1 potentially related email(s)."],
++    ...overrides,
++  };
++}
++
++function record(overrides: Partial<EmailRecord> = {}): EmailRecord {
++  return {
++    emailId: "EMAIL-A",
++    caseId: "CASE-1",
++    evidence: {
++      filename: "a.eml",
++      sha256: "a".repeat(64),
++      fileSizeBytes: 1234,
++      createdAt: "2026-08-28T00:00:00.000Z",
++      storagePath: "data/emails/EMAIL-A/original.eml",
++    },
++    parsedEmail: parsedEmail("EMAIL-A"),
++    headerAnalysis: headerAnalysis(),
++    authentication: auth(),
++    iocs: iocs(),
++    urlAnalysis: null,
++    domainAnalysis: null,
++    risk: risk(),
++    aiAssessment: null,
++    infrastructure: null,
++    report: null,
++    explanations: [],
++    warnings: [],
++    mlAssessment: mlAssessment(),
++    intelligenceAssessment: null,
++    ...overrides,
++  };
++}
++
++describe("buildForensicReport — case info, evidence integrity, limitations", () => {
++  it("always includes emailId, caseId, SHA-256, timestamps, and the two required limitation strings verbatim", () => {
++    const r = record();
++    const report = buildForensicReport(r, null);
++
++    assert.equal(report.emailId, "EMAIL-A");
++    assert.equal(report.caseInformation.caseId, "CASE-1");
++    assert.equal(report.evidenceIntegrity.sha256, "a".repeat(64));
++    assert.equal(report.evidenceIntegrity.collectedAt, "2026-08-28T00:00:00.000Z");
++    assert.ok(report.generatedAt);
++    assert.ok(report.limitations.includes(GEOLOCATION_LIMITATION));
++    assert.ok(report.limitations.includes(THREAT_SCORE_LIMITATION));
++  });
++
++  it("reports caseId as null when the email has no case, without inventing one", () => {
++    const r = record({ caseId: null });
++    const report = buildForensicReport(r, null);
++    assert.equal(report.caseInformation.caseId, null);
++  });
++});
++
++describe("buildForensicReport — high-risk phishing", () => {
++  it("surfaces threat assessment, why-flagged evidence, and QUARANTINE_EMAIL recommendation", () => {
++    const ev: RiskEvidenceItem = {
++      type: "possible_lookalike_domain",
++      severity: "high",
++      weight: 35,
++      message: 'Domain "paypa1.com" closely resembles the trusted domain "paypal.com".',
++      evidence: {},
++      category: "urlDomain",
++      provenance: "DETERMINISTIC_ANALYSIS",
++    };
++    const r = record({
++      risk: risk({ score: 92, level: "critical", classification: "phishing" }),
++      explanations: [ev],
++    });
++
++    const report = buildForensicReport(r, null);
++    assert.equal(report.threatAssessment.score, 92);
++    assert.equal(report.threatAssessment.level, "critical");
++    assert.equal(report.threatAssessment.status, "AVAILABLE");
++    assert.equal(report.whyFlagged.length, 1);
++    assert.equal(report.whyFlagged[0].type, "possible_lookalike_domain");
++    assert.ok(report.recommendedActions.some((a) => a.action === "QUARANTINE_EMAIL"));
++  });
++});
++
++describe("buildForensicReport — suspicious domain", () => {
++  it("includes flagged lookalike domains in the URL/domain analysis section", () => {
++    const r = record({
++      iocs: iocs({ domains: ["paypa1.com"] }),
++      domainAnalysis: domainAnalysis([
++        {
++          domain: "paypa1.com",
++          tld: "com",
++          subdomain: null,
++          hostnameLength: 10,
++          hyphenCount: 0,
++          digitCount: 1,
++          isPunycode: false,
++          lookalikeOf: "paypal.com",
++          similarityScore: 0.9,
++        },
++      ]),
++    });
++
++    const report = buildForensicReport(r, null);
++    assert.equal(report.urlDomainAnalysis.status, "AVAILABLE");
++    assert.equal(report.urlDomainAnalysis.domains[0].lookalikeOf, "paypal.com");
++  });
++
++  it("marks URL/domain analysis NOT_APPLICABLE when there were no URLs or domains", () => {
++    const r = record({ iocs: iocs({ domains: [], urls: [] }), urlAnalysis: { emailId: "EMAIL-A", urls: [] }, domainAnalysis: domainAnalysis([]) });
++    const report = buildForensicReport(r, null);
++    assert.equal(report.urlDomainAnalysis.status, "NOT_APPLICABLE");
++  });
++});
++
++describe("buildForensicReport — related emails / campaign", () => {
++  it("includes related-campaign section when a correlation result is supplied", () => {
++    const r = record();
++    const report = buildForensicReport(r, related());
++    assert.equal(report.relatedCampaign.available, true);
++    assert.equal(report.relatedCampaign.campaignId, "CMP-ABCD1234");
++    assert.deepEqual(report.relatedCampaign.relatedEmailIds, ["EMAIL-B"]);
++  });
++
++  it("marks related-campaign section unavailable (not fabricated as empty-and-checked) when no correlation was supplied", () => {
++    const r = record();
++    const report = buildForensicReport(r, null);
++    assert.equal(report.relatedCampaign.available, false);
++    assert.equal(report.relatedCampaign.campaignId, null);
++    assert.deepEqual(report.relatedCampaign.relatedEmailIds, []);
++  });
++});
++
++describe("buildForensicReport — infrastructure anomalies", () => {
++  it("includes infrastructure/geolocation fields and the geolocation limitation", () => {
++    const r = record({
++      infrastructure: infra({
++        candidateIp: "198.51.100.1",
++        country: "US",
++        asn: "AS999",
++        status: "AVAILABLE",
++      }),
++    });
++    const report = buildForensicReport(r, null);
++    assert.ok(report.infrastructure);
++    assert.equal(report.infrastructure!.candidateIp, "198.51.100.1");
++    assert.equal(report.infrastructure!.asn, "AS999");
++    assert.ok(report.limitations.includes(GEOLOCATION_LIMITATION));
++  });
++
++  it("reports infrastructure as null (not fabricated) when infrastructure enrichment never ran", () => {
++    const r = record({ infrastructure: null });
++    const report = buildForensicReport(r, null);
++    assert.equal(report.infrastructure, null);
++  });
++});
++
++describe("buildForensicReport — low-risk emails", () => {
++  it("reports a clean low-risk email with an empty recommendations list", () => {
++    const r = record({ risk: risk({ score: 5, level: "low", classification: "legitimate" }) });
++    const report = buildForensicReport(r, null);
++    assert.equal(report.threatAssessment.level, "low");
++    assert.deepEqual(report.recommendedActions, []);
++    assert.deepEqual(report.whyFlagged, []);
++  });
++});
++
++describe("buildForensicReport — missing evidence", () => {
++  it("marks threat assessment INSUFFICIENT_EVIDENCE when risk.score is null, without fabricating a score", () => {
++    const r = record({
++      risk: risk({
++        score: null,
++        level: null,
++        classification: "insufficient_evidence",
++        confidence: 0,
++        evidenceCoverage: 0.2,
++      }),
++    });
++    const report = buildForensicReport(r, null);
++    assert.equal(report.threatAssessment.status, "INSUFFICIENT_EVIDENCE");
++    assert.equal(report.threatAssessment.score, null);
++  });
++
++  it("marks each section UNAVAILABLE rather than fabricating content when its source data is null", () => {
++    const r = record({
++      parsedEmail: null,
++      headerAnalysis: null,
++      authentication: null,
++      iocs: null,
++      risk: null,
++    });
++    const report = buildForensicReport(r, null);
++    assert.equal(report.emailMetadata.status, "UNAVAILABLE");
++    assert.equal(report.authentication.status, "UNAVAILABLE");
++    assert.equal(report.headerForensics.status, "UNAVAILABLE");
++    assert.equal(report.iocs.status, "UNAVAILABLE");
++    assert.equal(report.threatAssessment.status, "INSUFFICIENT_EVIDENCE");
++  });
++});
++
++describe("buildForensicReport — data integrity", () => {
++  it("why-flagged is exactly the stored explanations list, never re-derived", () => {
++    const ev1: RiskEvidenceItem = {
++      type: "spf_fail",
++      severity: "medium",
++      weight: 25,
++      message: "SPF failed.",
++      evidence: {},
++      category: "technical",
++      provenance: "DETERMINISTIC_ANALYSIS",
++    };
++    const ev2: RiskEvidenceItem = {
++      type: "urgency_language",
++      severity: "low",
++      weight: 10,
++      message: "Urgency language detected.",
++      evidence: {},
++      category: "content",
++      provenance: "DETERMINISTIC_ANALYSIS",
++    };
++    const r = record({ explanations: [ev1, ev2] });
++    const report = buildForensicReport(r, null);
++    assert.deepEqual(
++      report.whyFlagged.map((w) => w.type),
++      ["spf_fail", "urgency_language"]
++    );
++  });
++
++  it("does not generate a PDF or binary payload — response is plain structured JSON", () => {
++    const r = record();
++    const report = buildForensicReport(r, null);
++    const serialized = JSON.stringify(report);
++    assert.ok(!serialized.includes("%PDF"));
++    assert.equal(typeof report, "object");
++  });
++});
+diff --git a/backend-batch3.5/backend/tests/scan-batch5.test.ts b/backend-batch3.5/backend/tests/scan-batch5.test.ts
+index f37641a..157b7bf 100644
+--- a/backend-batch3.5/backend/tests/scan-batch5.test.ts
++++ b/backend-batch3.5/backend/tests/scan-batch5.test.ts
+@@ -354,10 +354,14 @@ describe("Batch 5 email-centric API", { concurrency: false }, () => {
+     assert.ok(!blob.toLowerCase().includes("stack"));
+   });
+ 
+-  it("GET /emails/:emailId/report is unchanged when Batch 6 has not run", async () => {
++  it("GET /emails/:emailId/report returns a structured report now that Batch 6 has run", async () => {
+     const scan = await request(app).post("/api/v1/emails/scan").attach("file", eml({}), "report.eml");
+     const res = await request(app).get(`/api/v1/emails/${scan.body.emailId}/report`);
+-    assert.equal(res.status, 404);
+-    assert.equal(res.body.error.code, "REPORT_NOT_AVAILABLE");
++    assert.equal(res.status, 200);
++    assert.equal(res.body.emailId, scan.body.emailId);
++    assert.ok(res.body.caseInformation);
++    assert.ok(res.body.evidenceIntegrity);
++    assert.ok(Array.isArray(res.body.limitations));
++    assert.ok(res.body.limitations.length >= 2);
+   });
+ });
+diff --git a/backend-batch3.5/backend/tests/scan.test.ts b/backend-batch3.5/backend/tests/scan.test.ts
+index 15efcfd..032b5ab 100644
+--- a/backend-batch3.5/backend/tests/scan.test.ts
++++ b/backend-batch3.5/backend/tests/scan.test.ts
+@@ -158,12 +158,12 @@ test("GET /emails lists scanned emails as lightweight summaries", async () => {
+   assert.ok(!("body" in row));
+ });
+ 
+-test("GET /emails/:emailId/report is 404 before a report has been generated", async () => {
++test("GET /emails/:emailId/report returns a structured report now that Batch 6 has run", async () => {
+   const scanRes = await request(app)
+     .post("/api/v1/emails/scan")
+     .attach("file", sampleEml(), "no-report-yet.eml");
+ 
+   const res = await request(app).get(`/api/v1/emails/${scanRes.body.emailId}/report`);
+-  assert.equal(res.status, 404);
+-  assert.equal(res.body.error.code, "REPORT_NOT_AVAILABLE");
++  assert.equal(res.status, 200);
++  assert.equal(res.body.emailId, scanRes.body.emailId);
+ });
+-- 
+2.43.0
+

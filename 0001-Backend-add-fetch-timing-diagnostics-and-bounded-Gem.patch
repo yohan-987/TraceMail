@@ -1,0 +1,587 @@
+From e05fc7ff4e2da0419be81771b1639985e8dcea1d Mon Sep 17 00:00:00 2001
+From: Yohan <you@example.com>
+Date: Sun, 30 Aug 2026 03:04:10 +0000
+Subject: [PATCH] Backend: add fetch timing diagnostics and bounded Gemini
+ generation
+
+Regenerated against the current HEAD (feec12e, "Backend: fix ML loading
+and add Gemini provider"). Confirmed this repo's actual current
+llmClient.ts/aiAssessment.ts before editing (bare, no prior [ai-debug]
+logging present in this pushed state).
+
+DIAGNOSIS
+
+fetchWithTimeout() (src/utils/http.ts) was inspected and left
+unchanged - it's a standard, correct AbortController timeout pattern
+with no defect found. The scan route's Promise.all([assessAi(...),
+analyzeInfrastructure(...)]) runs them independently; infra's own
+timing can't extend AI's timeout. LLM_TIMEOUT_MS is read fresh per
+call and, per the reported behavior (waiting close to the full 60s
+before erroring), is being parsed and applied correctly - not a
+NaN-immediate-fire situation.
+
+The one concrete, evidenced difference between the working direct
+request and the app's real request: the app's request additionally
+carries a systemInstruction and a much larger, structurally complex
+`contents` payload (subject, up to 4000 chars of body, up to 12 header
+anomalies, SPF/DKIM/DMARC, up to 10 URLs/domains, ML fields) - and,
+critically, sets no explicit thinking/output bounds at all.
+
+I verified against Google's current Gemini API docs (live search, since
+my training data predates Gemini 3) that gemini-3.6-flash is a Gemini
+3.x-generation model, which:
+  - uses generationConfig.thinkingConfig.thinkingLevel ("low" /
+    "medium" / "high") to control reasoning effort - NOT the legacy
+    Gemini 2.5-series thinkingBudget field (mixing the two returns an
+    HTTP 400)
+  - cannot fully disable thinking on the Flash tier - only reduce it
+  - defaults to a "medium" thinking level when unspecified (documented
+    for the closely related 3.5 Flash tier)
+  - reports thinking tokens and output tokens as SEPARATE budgets in
+    usage metadata, meaning maxOutputTokens alone does not bound
+    reasoning time
+
+This makes "the model's default thinking effort scaling up on a large,
+complex prompt while a two-word prompt returns instantly" a plausible,
+evidence-grounded explanation - not a proven one. I have no network
+egress to generativelanguage.googleapis.com from this sandbox, so I
+cannot confirm live that this resolves the timeout. The timing/error
+diagnostics added here will make that immediately visible on the next
+real run: either a fast, successful response (supporting this
+diagnosis), or a fast HTTP 400 if thinkingLevel is ever rejected for
+this model (surfaced clearly, not a silent hang), or a genuinely slow
+fetch phase (pointing elsewhere).
+
+CHANGES
+
+1. src/services/llmClient.ts (createGeminiProvider):
+   - Added generationConfig.maxOutputTokens: 2048, sized against this
+     app's own llmOutput.ts schema worst case (summary <=2000 chars +
+     recommendedActions <=12x300 chars + attackType <=80 chars ~=
+     5.7KB ~= ~1500 tokens, rounded up with margin).
+   - Added generationConfig.thinkingConfig: { thinkingLevel: "low" } -
+     the Gemini 3.x-appropriate field (see diagnosis above); never
+     thinkingBudget (legacy 2.5-series field, would 400 if combined).
+   - Added the exact timing checkpoints requested: before fetch / fetch
+     started / fetch resolved / response status / before
+     response.json() / after response.json(), logging only elapsed ms,
+     request body byte length, timeout value, HTTP status, and an
+     approximate response body byte length (computed from the already-
+     parsed body via JSON.stringify, so existing/new tests' fetch mocks
+     don't need a new res.text() capability).
+   - Kept the existing safe Gemini-error-message surfacing and
+     finishReason/blockReason logging from the prior change.
+   - fetchWithTimeout() itself and the LlmProvider interface are
+     UNCHANGED.
+
+2. src/analyzers/aiAssessment.ts:
+   - Added an elapsed-time log specifically around the
+     provider.complete() call (start timestamp immediately before the
+     call, elapsed logged immediately after it resolves), plus the
+     prior JSON-parse/schema-validation success/failure diagnostics and
+     per-stage failure logging (provider.complete() / JSON.parse() /
+     Zod validation / unexpected), all content-free.
+
+3. src/scripts/geminiTimingDiagnostic.ts (new, manual-only):
+   - Run via `npm run diagnose:gemini` (or
+     `npx tsx src/scripts/geminiTimingDiagnostic.ts`).
+   - Loads the real .env (dotenv/config) and calls the actual
+     llmProviderFromEnv() / LlmProvider.complete() - the same provider
+     code the app uses, unchanged interface - once with a tiny prompt,
+     once with a synthetic "realistic" prompt built via the real
+     buildLlmUserPayload() using placeholder Latin filler text sized to
+     match a real scan payload (never real email content).
+   - Prints only byte sizes and elapsed milliseconds for a direct
+     side-by-side comparison against the user's native-fetch baseline.
+   - Not part of `npm test`; uses no API key of its own (reads whatever
+     is in the local, gitignored .env; safe to run with none
+     configured - prints "provider is null" and exits cleanly, verified
+     directly).
+   - Added a package.json "diagnose:gemini" script for convenience.
+
+4. tests/llmClient.test.ts: added 3 tests (mocked fetch, no real key) -
+   confirms maxOutputTokens and thinkingConfig.thinkingLevel are sent
+   and thinkingBudget is never also sent; confirms Gemini's own error
+   message is still surfaced; confirms the new timing instrumentation
+   doesn't change the resolved value or require anything new from
+   existing fetch mocks.
+
+Nothing changed in: fetchWithTimeout(), the LlmProvider interface, the
+ML classifier, the risk engine, Batch 5C, Batch 6, or the frontend.
+
+Never logged anywhere in this change: the API key, email body/prompt
+text, or the raw LLM response text.
+
+npm test: 247/247 passing (3 new, 244 baseline unchanged).
+npm run build: clean.
+
+Verification performed:
+  - npx tsc --noEmit -p tsconfig.json: clean (including the new script).
+  - Ran the new diagnostic script with no LLM_API_KEY configured:
+    confirmed it logs "provider initialized: false" and exits cleanly,
+    without crashing or leaking anything.
+  - Confirmed via the test suite's captured [ai-debug] output that
+    every timing/error checkpoint requested actually fires in the
+    expected order (before fetch -> fetch started -> fetch resolved ->
+    response status -> before/after response.json(), or the error-path
+    equivalents).
+---
+ backend-batch3.5/backend/package.json         |   3 +-
+ .../backend/src/analyzers/aiAssessment.ts     |  27 +++-
+ .../src/scripts/geminiTimingDiagnostic.ts     | 144 ++++++++++++++++++
+ .../backend/src/services/llmClient.ts         | 123 ++++++++++++---
+ .../backend/tests/llmClient.test.ts           |  50 ++++++
+ 5 files changed, 327 insertions(+), 20 deletions(-)
+ create mode 100644 backend-batch3.5/backend/src/scripts/geminiTimingDiagnostic.ts
+
+diff --git a/backend-batch3.5/backend/package.json b/backend-batch3.5/backend/package.json
+index 7e9fb03..4816621 100644
+--- a/backend-batch3.5/backend/package.json
++++ b/backend-batch3.5/backend/package.json
+@@ -9,7 +9,8 @@
+     "start": "node dist/server.js",
+     "typecheck": "tsc --noEmit",
+     "test": "tsx --test tests/*.test.ts",
+-    "train:ml": "tsx src/ml/trainModel.ts"
++    "train:ml": "tsx src/ml/trainModel.ts",
++    "diagnose:gemini": "tsx src/scripts/geminiTimingDiagnostic.ts"
+   },
+   "dependencies": {
+     "cors": "^2.8.5",
+diff --git a/backend-batch3.5/backend/src/analyzers/aiAssessment.ts b/backend-batch3.5/backend/src/analyzers/aiAssessment.ts
+index 56e1d1d..b519c1a 100644
+--- a/backend-batch3.5/backend/src/analyzers/aiAssessment.ts
++++ b/backend-batch3.5/backend/src/analyzers/aiAssessment.ts
+@@ -95,11 +95,21 @@ export async function assessAi(options: {
+   }
+ 
+   try {
++    const completeStart = Date.now();
+     const raw = await provider.complete({
+       system: SYSTEM_PROMPT,
+       user: buildLlmUserPayload(options),
+     });
++    // TEMPORARY SAFE DIAGNOSTIC — elapsed time and structural shape
++    // checks only, never the actual response text (the model's summary
++    // can echo fragments of the email, so treat it the same as email
++    // content for logging purposes).
++    console.error(
++      `[ai-debug] provider.complete() resolved | elapsed: ${Date.now() - completeStart}ms | raw length: ${raw.length} | starts with '{': ${raw.trim().startsWith("{")}`
++    );
++
+     const parsed = parseLlmSemanticJson(raw);
++    console.error("[ai-debug] JSON parse + schema validation: OK");
+     const score = aiContentScore(parsed);
+     const aiAssessment: AIAssessment = {
+       emailId,
+@@ -136,15 +146,30 @@ export async function assessAi(options: {
+ 
+     return { aiAssessment, evidence };
+   } catch (err) {
++    // TEMPORARY SAFE DIAGNOSTIC — error type/name and a bounded,
++    // content-free message only. Zod issue messages describe schema
++    // shape problems (e.g. "phishingIntent: Expected number, received
++    // string"), never email content, so a truncated summary is safe.
+     if (err instanceof TimeoutError) {
++      console.error(`[ai-debug] assessAi failed at: provider.complete() — ${err.message}`);
+       return { aiAssessment: unavailableAi(emailId, "ERROR"), evidence: [] };
+     }
+     if (err instanceof LlmUnavailableError) {
++      console.error(`[ai-debug] assessAi failed at: provider.complete() — ${err.message}`);
++      return { aiAssessment: unavailableAi(emailId, "UNAVAILABLE"), evidence: [] };
++    }
++    if (err instanceof SyntaxError) {
++      console.error(`[ai-debug] assessAi failed at: JSON.parse() — ${err.message}`);
+       return { aiAssessment: unavailableAi(emailId, "UNAVAILABLE"), evidence: [] };
+     }
+-    if (err instanceof SyntaxError || err instanceof ZodError) {
++    if (err instanceof ZodError) {
++      const issues = err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ").slice(0, 300);
++      console.error(`[ai-debug] assessAi failed at: schema validation — ${issues}`);
+       return { aiAssessment: unavailableAi(emailId, "UNAVAILABLE"), evidence: [] };
+     }
++    console.error(
++      `[ai-debug] assessAi failed at: unexpected error — ${err instanceof Error ? err.constructor.name + ": " + err.message : String(err)}`
++    );
+     return { aiAssessment: unavailableAi(emailId, "UNAVAILABLE"), evidence: [] };
+   }
+ }
+diff --git a/backend-batch3.5/backend/src/scripts/geminiTimingDiagnostic.ts b/backend-batch3.5/backend/src/scripts/geminiTimingDiagnostic.ts
+new file mode 100644
+index 0000000..3bf2526
+--- /dev/null
++++ b/backend-batch3.5/backend/src/scripts/geminiTimingDiagnostic.ts
+@@ -0,0 +1,144 @@
++import "dotenv/config";
++import { buildLlmUserPayload } from "../analyzers/aiAssessment";
++import { llmProviderFromEnv } from "../services/llmClient";
++import type {
++  AuthenticationAnalysis,
++  HeaderAnalysis,
++  MLAssessment,
++  ParsedEmail,
++  URLAnalysis,
++} from "../schemas/types";
++
++// MANUAL, TEMPORARY diagnostic — not run by `npm test`, not wired into
++// any route. Run by hand with a real .env configured:
++//
++//   npx tsx src/scripts/geminiTimingDiagnostic.ts
++//
++// Compares the SAME provider code (llmProviderFromEnv() ->
++// LlmProvider.complete(), unchanged interface) against two payload
++// sizes: a two-word prompt (mirrors the user's known-working direct
++// test) and a synthetic "realistic" prompt built the same way
++// buildLlmUserPayload() builds the real one — using placeholder Latin
++// filler text, NEVER a real email — so the two runs are an apples-to-
++// apples comparison through the app's actual code path.
++//
++// Prints only sizes and elapsed milliseconds. Never prints the API
++// key, the prompt text, or the raw response text.
++
++const SYSTEM_PROMPT_FOR_TINY_TEST = "Reply with exactly: {\"ok\":true}";
++
++// Deliberately synthetic — not a real email, not real evidence. Sized
++// to resemble a realistic scan payload (subject + ~4000 char body +
++// several header/URL/domain entries), matching buildLlmUserPayload's
++// own truncation limits so the comparison is representative.
++function syntheticRealisticPayload(): string {
++  const fillerSentence =
++    "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore. ";
++  const bodyText = fillerSentence.repeat(45); // ~4300 chars before truncation to 4000
++
++  const parsed: ParsedEmail = {
++    emailId: "DIAGNOSTIC-ONLY",
++    subject: "Diagnostic placeholder subject line for timing comparison",
++    from: [{ displayName: "Example Sender", email: "sender@example.test", localPart: "sender", domain: "example.test" }],
++    to: [{ displayName: null, email: "recipient@example.test", localPart: "recipient", domain: "example.test" }],
++    cc: [],
++    bcc: [],
++    replyTo: [{ displayName: null, email: "reply@example.test", localPart: "reply", domain: "example.test" }],
++    returnPath: [],
++    date: new Date().toISOString(),
++    messageId: "<diagnostic-only@example.test>",
++    headers: { normalized: {}, raw: [] },
++    body: { text: bodyText, html: null },
++    attachments: [],
++  };
++
++  const headerAnalysis: HeaderAnalysis = {
++    emailId: "DIAGNOSTIC-ONLY",
++    anomalies: Array.from({ length: 12 }, (_, i) => ({
++      type: `diagnostic_anomaly_${i}`,
++      severity: "medium" as const,
++      message: `Placeholder anomaly message ${i} for timing diagnostic only.`,
++      evidence: {},
++      weight: 5,
++      category: "technical" as const,
++      provenance: "DETERMINISTIC_ANALYSIS" as const,
++    })),
++    receivedChain: [],
++    status: "VERIFIED",
++  };
++
++  const authentication: AuthenticationAnalysis = {
++    emailId: "DIAGNOSTIC-ONLY",
++    spf: { result: "fail", raw: "v=spf1 -all" },
++    dkim: { result: "fail", raw: null },
++    dmarc: { result: "fail", policy: "reject", raw: "p=reject" },
++  };
++
++  const urlAnalysis: URLAnalysis = {
++    emailId: "DIAGNOSTIC-ONLY",
++    urls: Array.from({ length: 10 }, (_, i) => ({
++      url: `https://diagnostic-${i}.example.test/path`,
++      hostname: `diagnostic-${i}.example.test`,
++      domain: `diagnostic-${i}.example.test`,
++      isHttps: true,
++      urlLength: 40,
++      subdomainLength: 0,
++      pathLength: 5,
++      queryLength: 0,
++      hasIpHost: false,
++      hasAtSymbol: false,
++      hasEncodedCharacters: false,
++      hasMultipleSubdomains: false,
++      isShortened: false,
++      riskNotes: [],
++    })),
++  };
++
++  const mlAssessment: MLAssessment = {
++    emailId: "DIAGNOSTIC-ONLY",
++    model: "tfidf-logistic-v1",
++    modelVersion: "1.0.0",
++    classification: "phishing",
++    probability: 0.5,
++    status: "AVAILABLE",
++  };
++
++  return buildLlmUserPayload({ parsed, headerAnalysis, authentication, urlAnalysis, mlAssessment });
++}
++
++async function runOne(label: string, system: string, user: string): Promise<void> {
++  const provider = llmProviderFromEnv();
++  if (!provider) {
++    console.log(`[${label}] provider is null — check LLM_PROVIDER/LLM_API_KEY/LLM_MODEL in .env`);
++    return;
++  }
++
++  const bodyBytes = Buffer.byteLength(system, "utf-8") + Buffer.byteLength(user, "utf-8");
++  console.log(`\n=== ${label} === (approx system+user bytes: ${bodyBytes})`);
++  const start = Date.now();
++  try {
++    const result = await provider.complete({ system, user });
++    console.log(
++      `[${label}] SUCCESS | elapsed: ${Date.now() - start}ms | response length: ${result.length} chars`
++    );
++  } catch (err) {
++    console.log(
++      `[${label}] FAILED | elapsed: ${Date.now() - start}ms | ${err instanceof Error ? err.constructor.name + ": " + err.message : String(err)}`
++    );
++  }
++}
++
++async function main() {
++  console.log("Gemini timing diagnostic — compares the app's real provider code with two prompt sizes.");
++  console.log("(The [ai-debug] lines interleaved below come from llmClient.ts/aiAssessment.ts itself.)");
++
++  await runOne("tiny prompt", SYSTEM_PROMPT_FOR_TINY_TEST, "");
++  await runOne("realistic-size synthetic prompt", "You are a phishing-analysis assistant. Reply with a small JSON object.", syntheticRealisticPayload());
++
++  console.log("\nCompare the two 'elapsed' values above against your native-fetch baseline.");
++}
++
++main().catch((err) => {
++  console.error("Diagnostic script failed:", err instanceof Error ? err.message : String(err));
++  process.exitCode = 1;
++});
+diff --git a/backend-batch3.5/backend/src/services/llmClient.ts b/backend-batch3.5/backend/src/services/llmClient.ts
+index 8e1fb68..d5900ca 100644
+--- a/backend-batch3.5/backend/src/services/llmClient.ts
++++ b/backend-batch3.5/backend/src/services/llmClient.ts
+@@ -80,29 +80,107 @@ export function createGeminiProvider(options: {
+   return {
+     async complete(request: LlmCompletionRequest): Promise<string> {
+       const url = `${baseUrl}/${encodeURIComponent(options.model)}:generateContent?key=${encodeURIComponent(options.apiKey)}`;
+-      const res = await fetchWithTimeout(
+-        url,
+-        {
+-          method: "POST",
+-          headers: { "content-type": "application/json" },
+-          body: JSON.stringify({
+-            systemInstruction: { parts: [{ text: request.system }] },
+-            contents: [{ role: "user", parts: [{ text: request.user }] }],
+-          }),
++      const requestBody = JSON.stringify({
++        systemInstruction: { parts: [{ text: request.system }] },
++        contents: [{ role: "user", parts: [{ text: request.user }] }],
++        generationConfig: {
++          // Ask Gemini to reply with a bare JSON body (supported by the
++          // v1beta generateContent API) so we don't depend solely on
++          // parseLlmSemanticJson's markdown-fence stripping to recover
++          // valid JSON from a prose or fenced-code-block reply.
++          responseMimeType: "application/json",
++          // Bounds the FINAL answer only — Gemini reports thinking and
++          // output tokens as separate budgets in usage metadata, so
++          // this does NOT bound reasoning time by itself. Sized against
++          // this app's own llmOutput.ts schema worst case (summary
++          // <=2000 chars + recommendedActions <=12x300 chars +
++          // attackType <=80 chars ~= 5.7KB ~= ~1500 tokens), rounded up
++          // with margin.
++          maxOutputTokens: 2048,
++          // Gemini 3.x models (this app targets gemini-3.6-flash) use
++          // thinkingLevel, NOT the legacy Gemini 2.5-series
++          // thinkingBudget field — sending both in the same request
++          // returns an HTTP 400. Flash-tier 3.x models cannot fully
++          // disable thinking, only reduce it; "low" is the minimum
++          // available level. This directly targets the observed
++          // symptom: a small, fixed-shape JSON prompt timing out on a
++          // large/complex input while a two-word prompt succeeds
++          // instantly is consistent with the model's default thinking
++          // effort (documented as "medium" for this tier) scaling with
++          // prompt complexity. If a future model swap doesn't support
++          // this field, Gemini will reject it with an HTTP 400
++          // (surfaced by the diagnostics below), not a silent hang.
++          thinkingConfig: { thinkingLevel: "low" },
+         },
+-        timeoutMs,
+-        fetchImpl
+-      );
++      });
++
++      // TEMPORARY SAFE DIAGNOSTIC — timings and byte sizes only. Never
++      // the API key, the prompt/email content, or the raw response
++      // text. Remove once Gemini responses are confirmed reliably
++      // AVAILABLE within a reasonable time.
++      const requestBodyBytes = Buffer.byteLength(requestBody, "utf-8");
++      console.error(`[ai-debug] before fetch | body bytes: ${requestBodyBytes} | timeoutMs: ${timeoutMs}`);
++
++      const t0 = Date.now();
++      console.error(`[ai-debug] fetch started | elapsed: 0ms`);
++
++      let res: Response;
++      try {
++        res = await fetchWithTimeout(
++          url,
++          {
++            method: "POST",
++            headers: { "content-type": "application/json" },
++            body: requestBody,
++          },
++          timeoutMs,
++          fetchImpl
++        );
++      } catch (err) {
++        console.error(`[ai-debug] fetch rejected | elapsed: ${Date.now() - t0}ms`);
++        throw err;
++      }
++
++      console.error(`[ai-debug] fetch resolved | elapsed: ${Date.now() - t0}ms`);
++      console.error(`[ai-debug] response status: ${res.status}`);
+ 
+       if (!res.ok) {
+-        throw new LlmUnavailableError(`LLM HTTP ${res.status}`);
++        // Gemini error bodies are Google's own structured diagnostic text
++        // about the request (e.g. "API key not valid", "quota exceeded",
++        // "model not found") — never the caller's email content — so a
++        // short bounded excerpt is safe to surface here.
++        let safeDetail = "";
++        try {
++          const errBody = (await res.json()) as { error?: { message?: string; status?: string } };
++          safeDetail = errBody.error?.message?.slice(0, 200) ?? "";
++        } catch {
++          // Body wasn't JSON — nothing more to safely extract.
++        }
++        console.error(`[ai-debug] Gemini error detail: ${safeDetail || "(no structured error body)"}`);
++        throw new LlmUnavailableError(`LLM HTTP ${res.status}${safeDetail ? `: ${safeDetail}` : ""}`);
+       }
+ 
++      console.error(`[ai-debug] before response.json() | elapsed: ${Date.now() - t0}ms`);
+       const body = (await res.json()) as {
+-        candidates?: { content?: { parts?: { text?: string }[] } }[];
++        candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
++        promptFeedback?: { blockReason?: string };
+       };
++      console.error(
++        `[ai-debug] after response.json() | elapsed: ${Date.now() - t0}ms | response bytes (approx): ${Buffer.byteLength(JSON.stringify(body), "utf-8")}`
++      );
++
+       const text = body.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text;
+-      if (!text) throw new LlmUnavailableError("LLM returned no text content.");
++      if (!text) {
++        // Safe to log: finishReason/blockReason are Gemini's own enum
++        // labels (e.g. "SAFETY", "MAX_TOKENS", "RECITATION"), never
++        // content.
++        const finishReason = body.candidates?.[0]?.finishReason;
++        const blockReason = body.promptFeedback?.blockReason;
++        console.error(
++          `[ai-debug] Gemini returned no usable text — finishReason: ${finishReason ?? "none"}, blockReason: ${blockReason ?? "none"}`
++        );
++        throw new LlmUnavailableError("LLM returned no text content.");
++      }
+       return text;
+     },
+   };
+@@ -119,14 +197,21 @@ export function createGeminiProvider(options: {
+ // LLM_MODEL explicitly (e.g. "gemini-2.5-flash") when using Gemini.
+ export function llmProviderFromEnv(): LlmProvider | null {
+   const apiKey = process.env.LLM_API_KEY?.trim();
+-  if (!apiKey) return null;
++  if (!apiKey) {
++    console.error("[ai-debug] provider initialized: false (no LLM_API_KEY configured)");
++    return null;
++  }
+ 
+   const provider = (process.env.LLM_PROVIDER?.trim().toLowerCase() || "anthropic");
+   const timeoutMs = Number(process.env.LLM_TIMEOUT_MS ?? 15000);
+ 
+   if (provider === "gemini") {
+     const model = process.env.LLM_MODEL?.trim();
+-    if (!model) return null; // no safe default — require an explicit, current model name
++    if (!model) {
++      console.error("[ai-debug] provider initialized: false (LLM_PROVIDER=gemini but LLM_MODEL is not set)");
++      return null; // no safe default — require an explicit, current model name
++    }
++    console.error(`[ai-debug] provider initialized: true | provider: gemini | model: ${model}`);
+     return createGeminiProvider({
+       apiKey,
+       model,
+@@ -135,10 +220,12 @@ export function llmProviderFromEnv(): LlmProvider | null {
+     });
+   }
+ 
++  const model = process.env.LLM_MODEL?.trim() || "claude-haiku-4-5-20251001";
++  console.error(`[ai-debug] provider initialized: true | provider: anthropic | model: ${model}`);
+   return createAnthropicProvider({
+     apiKey,
+     apiUrl: process.env.LLM_API_URL?.trim() || "https://api.anthropic.com/v1/messages",
+-    model: process.env.LLM_MODEL?.trim() || "claude-haiku-4-5-20251001",
++    model,
+     timeoutMs,
+   });
+ }
+diff --git a/backend-batch3.5/backend/tests/llmClient.test.ts b/backend-batch3.5/backend/tests/llmClient.test.ts
+index 93e665b..bbb0da5 100644
+--- a/backend-batch3.5/backend/tests/llmClient.test.ts
++++ b/backend-batch3.5/backend/tests/llmClient.test.ts
+@@ -118,6 +118,56 @@ test("createGeminiProvider throws when the response has no usable text", async (
+   await assert.rejects(() => provider.complete({ system: "s", user: "u" }));
+ });
+ 
++test("createGeminiProvider requests JSON response mode and bounds generation (maxOutputTokens + thinkingConfig.thinkingLevel)", async () => {
++  let capturedBody: any = null;
++  const fetchImpl = (async (_url: string, init: RequestInit) => {
++    capturedBody = JSON.parse(init.body as string);
++    return {
++      ok: true,
++      status: 200,
++      json: async () => ({ candidates: [{ content: { parts: [{ text: "{}" }] } }] }),
++    } as Response;
++  }) as typeof fetch;
++
++  const provider = createGeminiProvider({ apiKey: "k", model: "gemini-3.6-flash", fetchImpl });
++  await provider.complete({ system: "s", user: "u" });
++
++  assert.equal(capturedBody.generationConfig?.responseMimeType, "application/json");
++  assert.equal(typeof capturedBody.generationConfig?.maxOutputTokens, "number");
++  assert.ok(capturedBody.generationConfig.maxOutputTokens > 0);
++  // Gemini 3.x uses thinkingLevel, never the legacy 2.5-series
++  // thinkingBudget field (mixing them causes an HTTP 400 on Gemini's
++  // side) — assert we never accidentally send both.
++  assert.equal(capturedBody.generationConfig?.thinkingConfig?.thinkingLevel, "low");
++  assert.equal(capturedBody.generationConfig?.thinkingConfig?.thinkingBudget, undefined);
++});
++
++test("createGeminiProvider surfaces Gemini's own error message on a non-2xx response (safe — no secrets/content)", async () => {
++  const fetchImpl = fakeFetch(403, { error: { message: "API key not valid. Please pass a valid API key.", status: "PERMISSION_DENIED" } });
++  const provider = createGeminiProvider({ apiKey: "k", model: "gemini-3.6-flash", fetchImpl });
++  await assert.rejects(
++    () => provider.complete({ system: "s", user: "u" }),
++    (err: Error) => {
++      assert.ok(err.message.includes("403"));
++      assert.ok(err.message.includes("API key not valid"));
++      return true;
++    }
++  );
++});
++
++test("createGeminiProvider still resolves correctly through the new before/after fetch timing instrumentation", async () => {
++  // Regression check: the added [ai-debug] timing logs must not change
++  // the resolved value or require any new capability from the fetch
++  // mock (e.g. no dependency on res.text()).
++  const provider = createGeminiProvider({
++    apiKey: "k",
++    model: "gemini-3.6-flash",
++    fetchImpl: fakeFetch(200, { candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] }),
++  });
++  const text = await provider.complete({ system: "s", user: "u" });
++  assert.equal(text, '{"ok":true}');
++});
++
+ test("createGeminiProvider respects an overridden apiBaseUrl without hardcoding it", async () => {
+   let capturedUrl = "";
+   const fetchImpl = (async (url: string) => {
+-- 
+2.43.0
+

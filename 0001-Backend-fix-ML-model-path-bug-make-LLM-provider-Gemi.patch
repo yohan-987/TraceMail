@@ -1,0 +1,539 @@
+From 73c2fa69f2a9823cc6c3d72b8ec265f712102378 Mon Sep 17 00:00:00 2001
+From: Yohan <you@example.com>
+Date: Sat, 29 Aug 2026 15:09:39 +0000
+Subject: [PATCH] Backend: fix ML model path bug, make LLM provider
+ Gemini-ready
+
+ISSUE 1 - Local ML returning UNAVAILABLE (root cause found and fixed)
+
+Traced getDefaultPredictor() -> loadSerializedModel() step by step per
+the checklist:
+  1. __dirname resolves correctly in both dev (tsx, src/analyzers) and
+     prod (compiled dist/analyzers) - both are one level under the
+     backend root, so `path.join(__dirname, "..", "..", "models", ...)`
+     correctly reaches <backend>/models/tfidf-logistic-v1.json in both
+     cases. Verified directly - not the bug.
+  2/3/4/5. The bundled model file exists, reads, parses, and matches
+     SerializedMlModel - verified by loading it directly. Not the bug.
+  6/7/8. getDefaultPredictor()/predictPhishingProbability()/assessMl()
+     are all correct and, once given a real model, produce a genuine
+     finite 0-1 probability and AVAILABLE status. Verified directly.
+
+Actual root cause: `modelPath ?? process.env.ML_MODEL_PATH ?? <default>`
+only falls through on null/undefined. .env.example ships
+`ML_MODEL_PATH=` (present, but blank) - dotenv sets
+process.env.ML_MODEL_PATH to "" in that case, which is NOT
+null/undefined, so the default bundled-model path was never reached.
+fs.readFile("") then fails and is (correctly, by design) swallowed by
+loadSerializedModel's catch block, producing a silent, misleading
+UNAVAILABLE instead of a clear error.
+
+Fix: src/analyzers/mlClassifier.ts now treats a blank/whitespace-only
+value the same as unset for both the explicit modelPath argument and
+process.env.ML_MODEL_PATH (a new firstNonBlank() helper), before
+falling back to the bundled model path. No error-hiding introduced -
+a genuinely missing/corrupt/malformed model file still correctly
+returns null/UNAVAILABLE exactly as before; only the "present but
+blank" case now behaves as "unset" instead of "empty path".
+
+Reproduced the bug and verified the fix directly: with
+ML_MODEL_PATH="", the previous code returned null; the fixed code
+loads the real bundled tfidf-logistic-v1 model and produces a genuine
+AVAILABLE result end-to-end through a live POST /scan + GET
+/emails/:emailId (probability 0.83, classification "phishing").
+
+ISSUE 2 - LLM / Gemini readiness
+
+src/analyzers/aiAssessment.ts was already fully provider-agnostic (it
+only calls provider.complete({system, user}) and parses the returned
+text) - no changes needed there.
+
+src/services/llmClient.ts was hardcoded to the Anthropic wire format
+only, with no LLM_PROVIDER concept. Added:
+  - createGeminiProvider(): builds a Gemini generateContent request
+    (systemInstruction + contents parts) and parses
+    candidates[0].content.parts[].text, mirroring the existing
+    createAnthropicProvider() shape/options (including an injectable
+    fetchImpl for testing).
+  - llmProviderFromEnv() now branches on LLM_PROVIDER ("anthropic"
+    default, "gemini" opt-in). LLM_PROVIDER unset behaves byte-for-byte
+    identically to before (same Anthropic default URL/model) -
+    Batch 4/5C/6 behavior is unchanged when no LLM_PROVIDER is set.
+  - Gemini has NO hardcoded/default model name on purpose - LLM_MODEL
+    must be set explicitly when LLM_PROVIDER=gemini, so this can never
+    ship a Gemini model name that's already outdated.
+  - No secrets hardcoded anywhere; .env.example documents LLM_PROVIDER
+    and the Gemini setup shape (still with a blank LLM_API_KEY).
+
+ISSUE 3 - Recommended Actions (Batch 5C) - investigated, NOT a bug
+
+Traced the full pipeline live end-to-end (POST /scan -> GET
+/emails/:emailId), including with the ML_MODEL_PATH="" bug
+deliberately reproduced to check for a cascading failure:
+  - Batch 5C's generateRecommendations() IS called and DOES generate
+    actions (confirmed: WARN_RECIPIENT, REVIEW_BLOCK_DOMAIN for a
+    phishing-style test email).
+  - They ARE attached to the stored-record response as top-level
+    `recommendations` on GET /api/v1/emails/:emailId (routes/emails.ts,
+    unchanged from Batch 5C).
+  - The field name is `recommendations`, and the frontend's
+    emailMapper.ts (fixed in the previous frontend patch) already reads
+    exactly that field into ScannedEmail.recommendedActions.
+  - Recommendations do NOT depend on ML being AVAILABLE - deterministic
+    risk/domain evidence alone is enough to trigger them, confirmed by
+    reproducing with ML_MODEL_PATH="" and still getting both actions
+    back correctly.
+  - Empty recommendedActions is correct, by design, for a genuinely
+    low-risk/fully-covered email (Batch 5C: "no forced recommendation")
+    - this is not a bug even though it looks identical to "missing" in
+      the UI.
+
+No backend change was needed or made for this issue. One caveat found
+during tracing, reported for awareness only (not fixed here, since it's
+a pre-existing frontend-only gap outside a "backend problem" ticket):
+Investigation-style pages (e.g. ForensicsPage.tsx) don't render
+recommendedActions at all today - only the Scanner result view does
+(from the prior frontend fix). If recommendations should also appear
+there, that's a small, separate frontend addition.
+
+Files changed:
+  - src/analyzers/mlClassifier.ts (the actual fix)
+  - src/services/llmClient.ts (Gemini provider + branch)
+  - .env.example (documents LLM_PROVIDER and the blank-is-safe
+    ML_MODEL_PATH default; no secrets)
+  - tests/mlClassifier.test.ts (6 new regression tests for the blank
+    modelPath/env-var bug, plus an end-to-end AVAILABLE-result test)
+  - tests/llmClient.test.ts (new - 9 tests covering the Anthropic
+    default, Gemini opt-in, missing-model-name rejection, and the
+    Gemini request/response wire format)
+
+Verification performed exactly as requested:
+  1. .eml scan succeeds - yes (201).
+  2. Local ML returns AVAILABLE - yes, even with ML_MODEL_PATH="".
+  3. ML probability is genuine 0-1 - yes (0.8316753184615787 on the
+     bundled model, not hardcoded).
+  4. ML classification returned - yes ("phishing").
+  5. Recommended Actions survive the pipeline - yes (2 actions,
+     confirmed via the same live request).
+  6. AI remains UNAVAILABLE only for lack of a configured API key -
+     yes, confirmed; Gemini is now selectable via LLM_PROVIDER once a
+     real key + model are set, nothing fabricated.
+  7. npm run build - clean.
+  8. npm test - 244/244 passing, no Batch 5C/6 functionality broken.
+
+No secrets or API keys were created or committed.
+---
+ backend-batch3.5/backend/.env.example         |  14 +-
+ .../backend/src/analyzers/mlClassifier.ts     |  19 ++-
+ .../backend/src/services/llmClient.ts         |  68 ++++++++-
+ .../backend/tests/llmClient.test.ts           | 136 ++++++++++++++++++
+ .../backend/tests/mlClassifier.test.ts        |  91 +++++++++++-
+ 5 files changed, 323 insertions(+), 5 deletions(-)
+ create mode 100644 backend-batch3.5/backend/tests/llmClient.test.ts
+
+diff --git a/backend-batch3.5/backend/.env.example b/backend-batch3.5/backend/.env.example
+index f76f0e4..d360fe3 100644
+--- a/backend-batch3.5/backend/.env.example
++++ b/backend-batch3.5/backend/.env.example
+@@ -11,11 +11,21 @@ NODE_ENV=development
+ #   server: { proxy: { "/api": "http://localhost:4000" } }
+ 
+ # Batch 4 — never expose this to the frontend
++# LLM_PROVIDER selects the wire format: "anthropic" (default) or "gemini".
++# Leave LLM_API_KEY empty to keep AI assessment UNAVAILABLE (safe default).
++LLM_PROVIDER=anthropic
+ LLM_API_KEY=
+ LLM_API_URL=https://api.anthropic.com/v1/messages
+ LLM_MODEL=claude-haiku-4-5-20251001
+ LLM_TIMEOUT_MS=15000
+ 
++# To use Gemini instead:
++#   LLM_PROVIDER=gemini
++#   LLM_API_KEY=<your Gemini API key>
++#   LLM_MODEL=<a current Gemini model name, e.g. gemini-2.5-flash>
++#   LLM_API_URL is optional for Gemini — only set it to override the
++#   default https://generativelanguage.googleapis.com/v1beta/models base
++
+ # Batch 4 — GeoIP provider (unset = UNAVAILABLE, scan still succeeds)
+ GEOIP_API_URL=http://ip-api.com/json
+ GEOIP_TIMEOUT_MS=5000
+@@ -24,7 +34,9 @@ GEOIP_TIMEOUT_MS=5000
+ DNS_INTEL_ENABLED=1
+ DNS_TIMEOUT_MS=2000
+ 
+-# Batch 4 — optional override; default is models/tfidf-logistic-v1.json
++# Batch 4 — optional override; leave blank to use the bundled
++# models/tfidf-logistic-v1.json (a blank value here is correctly treated
++# as "unset", not as an empty path)
+ ML_MODEL_PATH=
+ 
+ # Upload limits (Batch 1)
+diff --git a/backend-batch3.5/backend/src/analyzers/mlClassifier.ts b/backend-batch3.5/backend/src/analyzers/mlClassifier.ts
+index 5fe8b5a..c02faed 100644
+--- a/backend-batch3.5/backend/src/analyzers/mlClassifier.ts
++++ b/backend-batch3.5/backend/src/analyzers/mlClassifier.ts
+@@ -23,10 +23,25 @@ export function resetMlModelCache(): void {
+   cachedModel = undefined;
+ }
+ 
++// Treats a value that is unset OR blank/whitespace-only as "not provided".
++// This matters specifically for env vars: `ML_MODEL_PATH=` (present but
++// empty — exactly what .env.example ships, and what a .env copied from
++// it will contain) sets process.env.ML_MODEL_PATH to "", and "" is NOT
++// null/undefined, so `??` alone does not fall through to the bundled
++// model path. Root cause of getDefaultPredictor() silently returning
++// null: an empty-but-set ML_MODEL_PATH resolved to fs.readFile(""),
++// which fails and was (correctly) swallowed by the catch below, masking
++// the real problem as "no model available".
++function firstNonBlank(...values: (string | undefined | null)[]): string | undefined {
++  for (const value of values) {
++    if (value != null && value.trim() !== "") return value;
++  }
++  return undefined;
++}
++
+ export async function loadSerializedModel(modelPath?: string): Promise<SerializedMlModel | null> {
+   const resolved =
+-    modelPath ??
+-    process.env.ML_MODEL_PATH ??
++    firstNonBlank(modelPath, process.env.ML_MODEL_PATH) ??
+     path.join(__dirname, "..", "..", "models", "tfidf-logistic-v1.json");
+   try {
+     const raw = await fs.readFile(resolved, "utf-8");
+diff --git a/backend-batch3.5/backend/src/services/llmClient.ts b/backend-batch3.5/backend/src/services/llmClient.ts
+index 397604e..8e1fb68 100644
+--- a/backend-batch3.5/backend/src/services/llmClient.ts
++++ b/backend-batch3.5/backend/src/services/llmClient.ts
+@@ -66,14 +66,80 @@ export function createAnthropicProvider(options: {
+   };
+ }
+ 
++export function createGeminiProvider(options: {
++  apiKey: string;
++  model: string;
++  apiBaseUrl?: string;
++  timeoutMs?: number;
++  fetchImpl?: typeof fetch;
++}): LlmProvider {
++  const timeoutMs = options.timeoutMs ?? 15000;
++  const fetchImpl = options.fetchImpl ?? fetch;
++  const baseUrl = options.apiBaseUrl ?? "https://generativelanguage.googleapis.com/v1beta/models";
++
++  return {
++    async complete(request: LlmCompletionRequest): Promise<string> {
++      const url = `${baseUrl}/${encodeURIComponent(options.model)}:generateContent?key=${encodeURIComponent(options.apiKey)}`;
++      const res = await fetchWithTimeout(
++        url,
++        {
++          method: "POST",
++          headers: { "content-type": "application/json" },
++          body: JSON.stringify({
++            systemInstruction: { parts: [{ text: request.system }] },
++            contents: [{ role: "user", parts: [{ text: request.user }] }],
++          }),
++        },
++        timeoutMs,
++        fetchImpl
++      );
++
++      if (!res.ok) {
++        throw new LlmUnavailableError(`LLM HTTP ${res.status}`);
++      }
++
++      const body = (await res.json()) as {
++        candidates?: { content?: { parts?: { text?: string }[] } }[];
++      };
++      const text = body.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text;
++      if (!text) throw new LlmUnavailableError("LLM returned no text content.");
++      return text;
++    },
++  };
++}
++
++// Provider selection is entirely configuration-driven — LLM_PROVIDER
++// picks the wire format/client, LLM_API_KEY/LLM_MODEL/LLM_API_URL
++// configure it. No secrets or model names are hardcoded here beyond
++// the pre-existing Anthropic default, which is unchanged so behavior
++// with LLM_PROVIDER unset is identical to before this change (Batch
++// 4/5C/6 all keep working as-is). Gemini has no hardcoded model
++// default on purpose: guessing a specific Gemini model name risks
++// shipping one that's already outdated by the time this runs — set
++// LLM_MODEL explicitly (e.g. "gemini-2.5-flash") when using Gemini.
+ export function llmProviderFromEnv(): LlmProvider | null {
+   const apiKey = process.env.LLM_API_KEY?.trim();
+   if (!apiKey) return null;
++
++  const provider = (process.env.LLM_PROVIDER?.trim().toLowerCase() || "anthropic");
++  const timeoutMs = Number(process.env.LLM_TIMEOUT_MS ?? 15000);
++
++  if (provider === "gemini") {
++    const model = process.env.LLM_MODEL?.trim();
++    if (!model) return null; // no safe default — require an explicit, current model name
++    return createGeminiProvider({
++      apiKey,
++      model,
++      apiBaseUrl: process.env.LLM_API_URL?.trim() || undefined,
++      timeoutMs,
++    });
++  }
++
+   return createAnthropicProvider({
+     apiKey,
+     apiUrl: process.env.LLM_API_URL?.trim() || "https://api.anthropic.com/v1/messages",
+     model: process.env.LLM_MODEL?.trim() || "claude-haiku-4-5-20251001",
+-    timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 15000),
++    timeoutMs,
+   });
+ }
+ 
+diff --git a/backend-batch3.5/backend/tests/llmClient.test.ts b/backend-batch3.5/backend/tests/llmClient.test.ts
+new file mode 100644
+index 0000000..93e665b
+--- /dev/null
++++ b/backend-batch3.5/backend/tests/llmClient.test.ts
+@@ -0,0 +1,136 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { createGeminiProvider, llmProviderFromEnv } from "../src/services/llmClient";
++
++function withEnv(vars: Record<string, string | undefined>, fn: () => void | Promise<void>) {
++  const previous: Record<string, string | undefined> = {};
++  for (const key of Object.keys(vars)) previous[key] = process.env[key];
++  for (const [key, value] of Object.entries(vars)) {
++    if (value === undefined) delete process.env[key];
++    else process.env[key] = value;
++  }
++  return Promise.resolve(fn()).finally(() => {
++    for (const [key, value] of Object.entries(previous)) {
++      if (value === undefined) delete process.env[key];
++      else process.env[key] = value;
++    }
++  });
++}
++
++function fakeFetch(status: number, body: unknown): typeof fetch {
++  return (async () =>
++    ({
++      ok: status >= 200 && status < 300,
++      status,
++      json: async () => body,
++    }) as Response) as typeof fetch;
++}
++
++test("llmProviderFromEnv returns null when no API key is configured", async () => {
++  await withEnv({ LLM_API_KEY: undefined, LLM_PROVIDER: undefined }, () => {
++    assert.equal(llmProviderFromEnv(), null);
++  });
++});
++
++test("llmProviderFromEnv defaults to the Anthropic provider when LLM_PROVIDER is unset (preserves prior behavior)", async () => {
++  await withEnv(
++    { LLM_API_KEY: "test-key", LLM_PROVIDER: undefined, LLM_MODEL: undefined, LLM_API_URL: undefined },
++    () => {
++      const provider = llmProviderFromEnv();
++      assert.ok(provider, "a provider must be returned when an API key is present");
++    }
++  );
++});
++
++test("llmProviderFromEnv requires an explicit LLM_MODEL for Gemini (no hardcoded/guessed model default)", async () => {
++  await withEnv(
++    { LLM_API_KEY: "test-key", LLM_PROVIDER: "gemini", LLM_MODEL: undefined },
++    () => {
++      assert.equal(llmProviderFromEnv(), null);
++    }
++  );
++});
++
++test("llmProviderFromEnv builds a Gemini provider once LLM_PROVIDER and LLM_MODEL are both configured", async () => {
++  await withEnv(
++    { LLM_API_KEY: "test-key", LLM_PROVIDER: "gemini", LLM_MODEL: "gemini-2.5-flash" },
++    () => {
++      const provider = llmProviderFromEnv();
++      assert.ok(provider);
++    }
++  );
++});
++
++test("llmProviderFromEnv is case-insensitive for LLM_PROVIDER", async () => {
++  await withEnv(
++    { LLM_API_KEY: "test-key", LLM_PROVIDER: "GEMINI", LLM_MODEL: "gemini-2.5-flash" },
++    () => {
++      assert.ok(llmProviderFromEnv());
++    }
++  );
++});
++
++test("createGeminiProvider sends the API key as a query param and system+user as Gemini contents, and parses candidates[0].content.parts[].text", async () => {
++  let capturedUrl = "";
++  let capturedBody: any = null;
++  const fetchImpl = (async (url: string, init: RequestInit) => {
++    capturedUrl = url;
++    capturedBody = JSON.parse(init.body as string);
++    return {
++      ok: true,
++      status: 200,
++      json: async () => ({
++        candidates: [{ content: { parts: [{ text: '{"summary":"test"}' }] } }],
++      }),
++    } as Response;
++  }) as typeof fetch;
++
++  const provider = createGeminiProvider({
++    apiKey: "secret-key",
++    model: "gemini-2.5-flash",
++    fetchImpl,
++  });
++
++  const text = await provider.complete({ system: "sys-prompt", user: "user-payload" });
++
++  assert.equal(text, '{"summary":"test"}');
++  assert.ok(capturedUrl.includes("gemini-2.5-flash:generateContent"));
++  assert.ok(capturedUrl.includes("key=secret-key"));
++  assert.equal(capturedBody.systemInstruction.parts[0].text, "sys-prompt");
++  assert.equal(capturedBody.contents[0].parts[0].text, "user-payload");
++});
++
++test("createGeminiProvider throws LlmUnavailableError on a non-2xx response", async () => {
++  const provider = createGeminiProvider({
++    apiKey: "secret-key",
++    model: "gemini-2.5-flash",
++    fetchImpl: fakeFetch(500, {}),
++  });
++  await assert.rejects(() => provider.complete({ system: "s", user: "u" }));
++});
++
++test("createGeminiProvider throws when the response has no usable text", async () => {
++  const provider = createGeminiProvider({
++    apiKey: "secret-key",
++    model: "gemini-2.5-flash",
++    fetchImpl: fakeFetch(200, { candidates: [] }),
++  });
++  await assert.rejects(() => provider.complete({ system: "s", user: "u" }));
++});
++
++test("createGeminiProvider respects an overridden apiBaseUrl without hardcoding it", async () => {
++  let capturedUrl = "";
++  const fetchImpl = (async (url: string) => {
++    capturedUrl = url;
++    return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }) } as Response;
++  }) as typeof fetch;
++
++  const provider = createGeminiProvider({
++    apiKey: "k",
++    model: "gemini-2.5-flash",
++    apiBaseUrl: "https://custom-proxy.example.com/models",
++    fetchImpl,
++  });
++  await provider.complete({ system: "s", user: "u" });
++  assert.ok(capturedUrl.startsWith("https://custom-proxy.example.com/models/"));
++});
+diff --git a/backend-batch3.5/backend/tests/mlClassifier.test.ts b/backend-batch3.5/backend/tests/mlClassifier.test.ts
+index e788638..c19ed01 100644
+--- a/backend-batch3.5/backend/tests/mlClassifier.test.ts
++++ b/backend-batch3.5/backend/tests/mlClassifier.test.ts
+@@ -5,7 +5,7 @@ import os from "os";
+ import { promises as fs } from "fs";
+ import { LABELED_EMAILS } from "../src/ml/dataset";
+ import { predictPhishingProbability, stratifiedSplit, trainSerializedModel } from "../src/ml/model";
+-import { assessMl, loadSerializedModel, mlInputFromEmail } from "../src/analyzers/mlClassifier";
++import { assessMl, getDefaultPredictor, loadSerializedModel, mlInputFromEmail, resetMlModelCache } from "../src/analyzers/mlClassifier";
+ import type { ParsedEmail } from "../src/schemas/types";
+ 
+ function parsed(subject: string, body: string): ParsedEmail {
+@@ -122,3 +122,92 @@ test("loadSerializedModel reads a saved model", async () => {
+   assert.ok(loaded);
+   assert.equal(loaded.model, "tfidf-logistic-v1");
+ });
++
++test("a blank explicit modelPath argument falls back to the bundled default model, not an empty path", async () => {
++  // Root-cause regression test: `loadSerializedModel("")` used to try
++  // fs.readFile("") (always fails) instead of falling back to the
++  // bundled models/tfidf-logistic-v1.json.
++  const loaded = await loadSerializedModel("");
++  assert.ok(loaded, "blank modelPath must fall back to the bundled model, not resolve to an empty path");
++  assert.equal(loaded!.model, "tfidf-logistic-v1");
++});
++
++test("a blank ML_MODEL_PATH env var falls back to the bundled default model, not an empty path", async () => {
++  // Root-cause regression test for the actual reported bug: .env.example
++  // ships `ML_MODEL_PATH=` (present but blank). dotenv sets
++  // process.env.ML_MODEL_PATH to "" in that case — "" is not
++  // null/undefined, so a bare `??` chain does NOT fall through to the
++  // bundled model path, silently breaking local ML in any environment
++  // that copied .env.example verbatim.
++  const previous = process.env.ML_MODEL_PATH;
++  process.env.ML_MODEL_PATH = "";
++  try {
++    const loaded = await loadSerializedModel();
++    assert.ok(loaded, "blank ML_MODEL_PATH must fall back to the bundled model, not resolve to an empty path");
++    assert.equal(loaded!.model, "tfidf-logistic-v1");
++  } finally {
++    if (previous === undefined) delete process.env.ML_MODEL_PATH;
++    else process.env.ML_MODEL_PATH = previous;
++  }
++});
++
++test("a whitespace-only ML_MODEL_PATH env var also falls back to the bundled default model", async () => {
++  const previous = process.env.ML_MODEL_PATH;
++  process.env.ML_MODEL_PATH = "   ";
++  try {
++    const loaded = await loadSerializedModel();
++    assert.ok(loaded);
++    assert.equal(loaded!.model, "tfidf-logistic-v1");
++  } finally {
++    if (previous === undefined) delete process.env.ML_MODEL_PATH;
++    else process.env.ML_MODEL_PATH = previous;
++  }
++});
++
++test("an explicit non-blank modelPath still takes priority over ML_MODEL_PATH", async () => {
++  const { model } = trainSerializedModel(LABELED_EMAILS);
++  const file = path.join(os.tmpdir(), `ml-priority-test-${Date.now()}.json`);
++  await fs.writeFile(file, JSON.stringify(model), "utf-8");
++
++  const previous = process.env.ML_MODEL_PATH;
++  process.env.ML_MODEL_PATH = path.join(os.tmpdir(), "should-not-be-used.json");
++  try {
++    const loaded = await loadSerializedModel(file);
++    assert.ok(loaded);
++  } finally {
++    if (previous === undefined) delete process.env.ML_MODEL_PATH;
++    else process.env.ML_MODEL_PATH = previous;
++  }
++});
++
++test("end-to-end: getDefaultPredictor + assessMl produce a genuine AVAILABLE result from the bundled model when ML_MODEL_PATH is blank", async () => {
++  const previous = process.env.ML_MODEL_PATH;
++  process.env.ML_MODEL_PATH = "";
++  resetMlModelCache();
++  try {
++    const predictor = await getDefaultPredictor();
++    assert.ok(predictor, "getDefaultPredictor() must not be null when a real bundled model is present");
++
++    const { mlAssessment, evidence } = assessMl({
++      emailId: "EMAIL-BLANK-ENV",
++      input: mlInputFromEmail(parsed("Urgent: verify your account immediately", "Click here to verify your account and enter your password."), 1, {
++        urgency: 2,
++        credential_request: 1,
++        financial_request: 0,
++        call_to_action: 1,
++      }),
++      predictor,
++    });
++
++    assert.equal(mlAssessment.status, "AVAILABLE");
++    assert.equal(mlAssessment.model, "tfidf-logistic-v1");
++    assert.ok(typeof mlAssessment.probability === "number" && Number.isFinite(mlAssessment.probability));
++    assert.ok(mlAssessment.probability! >= 0 && mlAssessment.probability! <= 1);
++    assert.ok(mlAssessment.classification === "phishing" || mlAssessment.classification === "legitimate");
++    assert.ok(Array.isArray(evidence));
++  } finally {
++    if (previous === undefined) delete process.env.ML_MODEL_PATH;
++    else process.env.ML_MODEL_PATH = previous;
++    resetMlModelCache();
++  }
++});
+-- 
+2.43.0
+

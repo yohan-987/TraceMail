@@ -1,0 +1,319 @@
+From ae7290882a801b6480334f85793887abc2f5eb8d Mon Sep 17 00:00:00 2001
+From: Yohan <you@example.com>
+Date: Sat, 29 Aug 2026 04:54:09 +0000
+Subject: [PATCH] Frontend: fix email selection/navigation ID normalization
+ bugs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Root cause: EmailTable.tsx sourced its rows from the static mockEmails
+dataset instead of the live availableEmails list from ActiveCaseContext.
+Every page built on InvestigationWorkspace/EmailTable (Investigation hub,
+Forensics, Indicators, Infrastructure, AI Investigation, Reports) was
+therefore selecting/investigating mock IDs that don't exist in the
+backend, causing unreliable single-click previews, 404s on double-click,
+and unreliable Last Viewed updates.
+
+Fixes:
+- EmailTable.tsx: source rows from useActiveCase().availableEmails
+  instead of the mock dataset (the one shared-layer fix that cascades
+  correctly to every page using it)
+- IndicatorsPage.tsx, InfrastructurePage.tsx, AIInvestigationPage.tsx:
+  replaced fabricated { id, subject, caseId } stub objects with
+  getEmail(activeEmailData.emailId) from availableEmails, so
+  InvestigationShell/CaseSelector always receive a real, complete
+  ScannedEmail (or null, rendered safely) instead of an incomplete
+  object missing .status/.sender/.date/.threatScore (was causing a
+  black screen once a detail view loaded)
+- InvestigationWorkspace.tsx (EmailPreview): default .indicators and
+  .whyFlagged to [] so a lightweight/partial record can't crash the
+  shared preview
+- api.ts (getEmail): guard against undefined/null/empty-string/non-
+  string emailId, throwing a clear error instead of silently hitting
+  GET /api/v1/emails/undefined
+- OverviewPage.tsx: added the missing onDoubleClick handler on table
+  rows (reusing the existing handleInspect navigation — no new
+  navigation system), since Overview previously had no double-click
+  behavior at all
+
+No backend changes, no API contract changes, no mock-data introduced,
+no UI redesign, no changes to the AI/ML availability contract.
+
+npm run build: clean.
+---
+ FRONTEND/src/api/api.ts                       | 11 +++++++++++
+ FRONTEND/src/components/EmailTable.tsx        | 12 ++++++------
+ .../src/components/InvestigationWorkspace.tsx | 15 ++++++++++-----
+ FRONTEND/src/pages/AIInvestigationPage.tsx    | 19 ++++++++-----------
+ FRONTEND/src/pages/IndicatorsPage.tsx         | 13 ++++++-------
+ FRONTEND/src/pages/InfrastructurePage.tsx     | 13 ++++++-------
+ FRONTEND/src/pages/OverviewPage.tsx           |  4 ++++
+ 7 files changed, 51 insertions(+), 36 deletions(-)
+
+diff --git a/FRONTEND/src/api/api.ts b/FRONTEND/src/api/api.ts
+index cab0ca7..3620bf4 100644
+--- a/FRONTEND/src/api/api.ts
++++ b/FRONTEND/src/api/api.ts
+@@ -62,6 +62,17 @@ export async function getEmails(
+ }
+ 
+ export async function getEmail(emailId: string) {
++  // Defensive shared-layer guard: never let a malformed caller (undefined,
++  // null, empty string, or an accidentally-stringified object) reach the
++  // network as `/api/v1/emails/undefined` or similar. Fail fast and
++  // explicitly instead, so callers' existing .catch() handlers surface a
++  // clear error rather than a confusing 404.
++  if (typeof emailId !== "string" || emailId.trim() === "") {
++    throw new Error(
++      `getEmail requires a non-empty emailId string, received: ${JSON.stringify(emailId)}`
++    );
++  }
++
+   const response = await fetch(
+     `/api/v1/emails/${encodeURIComponent(emailId)}`
+   );
+diff --git a/FRONTEND/src/components/EmailTable.tsx b/FRONTEND/src/components/EmailTable.tsx
+index d46c8c4..89bebb6 100644
+--- a/FRONTEND/src/components/EmailTable.tsx
++++ b/FRONTEND/src/components/EmailTable.tsx
+@@ -11,7 +11,7 @@ import {
+   FolderKanban,
+ } from 'lucide-react';
+ import { SectionLabel, Badge } from '@/components/ui/Primitives';
+-import { mockEmails, type ScannedEmail, type EmailStatus } from '@/data/mockData';
++import { type ScannedEmail, type EmailStatus } from '@/data/mockData';
+ import { useActiveCase } from '@/context/ActiveCaseContext';
+ import { cn } from '@/lib/utils';
+ 
+@@ -44,7 +44,7 @@ interface EmailTableProps {
+ }
+ 
+ export function EmailTable({ selectedId, onSelect, onInvestigate, enableCaseFilter }: EmailTableProps) {
+-  const { lastViewedEmailId, lastViewedEmail } = useActiveCase();
++  const { lastViewedEmailId, lastViewedEmail, availableEmails } = useActiveCase();
+   const [query, setQuery] = useState('');
+   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+   const [caseFilter, setCaseFilter] = useState<CaseFilter>('all');
+@@ -54,12 +54,12 @@ export function EmailTable({ selectedId, onSelect, onInvestigate, enableCaseFilt
+   const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+ 
+   const uniqueCaseIds = useMemo(
+-    () => Array.from(new Set(mockEmails.filter((e) => e.caseId).map((e) => e.caseId))).sort(),
+-    []
++    () => Array.from(new Set(availableEmails.filter((e) => e.caseId).map((e) => e.caseId))).sort(),
++    [availableEmails]
+   );
+ 
+   const filtered = useMemo(() => {
+-    let result = mockEmails.filter((email) => {
++    let result = availableEmails.filter((email) => {
+       const matchesStatus =
+         statusFilter === 'all' ||
+         (statusFilter === 'clean' && email.status === 'safe') ||
+@@ -93,7 +93,7 @@ export function EmailTable({ selectedId, onSelect, onInvestigate, enableCaseFilt
+     });
+ 
+     return result;
+-  }, [query, statusFilter, caseFilter, enableCaseFilter, sortKey]);
++  }, [availableEmails, query, statusFilter, caseFilter, enableCaseFilter, sortKey]);
+ 
+   const totalPages = Math.ceil(filtered.length / pageSize);
+   const currentPage = Math.min(page, Math.max(0, totalPages - 1));
+diff --git a/FRONTEND/src/components/InvestigationWorkspace.tsx b/FRONTEND/src/components/InvestigationWorkspace.tsx
+index 541080a..03e5439 100644
+--- a/FRONTEND/src/components/InvestigationWorkspace.tsx
++++ b/FRONTEND/src/components/InvestigationWorkspace.tsx
+@@ -118,9 +118,14 @@ export function EmailPreview({
+   onReport?: () => void;
+ }) {
+   const Icon = statusIcon[email.status];
+-  const ips = email.indicators.filter((i) => i.type === 'IP').length;
+-  const domains = email.indicators.filter((i) => i.type === 'Domain').length;
+-  const urls = email.indicators.filter((i) => i.type === 'URL').length;
++  // Defensive: a lightweight/partial record (e.g. from an API list response
++  // or a page still loading full details) may not carry these deep arrays —
++  // never assume they're present.
++  const indicators = email.indicators ?? [];
++  const whyFlagged = email.whyFlagged ?? [];
++  const ips = indicators.filter((i) => i.type === 'IP').length;
++  const domains = indicators.filter((i) => i.type === 'Domain').length;
++  const urls = indicators.filter((i) => i.type === 'URL').length;
+   const isThreat = email.threatScore >= 60;
+ 
+   return (
+@@ -166,14 +171,14 @@ export function EmailPreview({
+         <IocChip icon={Paperclip} label="Attachments" count={0} />
+       </div>
+ 
+-      {email.whyFlagged.length > 0 && (
++      {whyFlagged.length > 0 && (
+         <>
+           <div className="flex items-center gap-2 mb-2.5">
+             <Flag className="w-3 h-3 text-accent-500" />
+             <SectionLabel>Why Flagged</SectionLabel>
+           </div>
+           <ul className="space-y-2 mb-5">
+-            {email.whyFlagged.slice(0, 5).map((reason, i) => (
++            {whyFlagged.slice(0, 5).map((reason, i) => (
+               <li key={i} className="flex items-start gap-2 text-[11px] text-ink-400 leading-relaxed">
+                 <span className="mono text-[9px] text-accent-600 mt-0.5 shrink-0">
+                   {String(i + 1).padStart(2, '0')}
+diff --git a/FRONTEND/src/pages/AIInvestigationPage.tsx b/FRONTEND/src/pages/AIInvestigationPage.tsx
+index 118d8b1..d2a2afc 100644
+--- a/FRONTEND/src/pages/AIInvestigationPage.tsx
++++ b/FRONTEND/src/pages/AIInvestigationPage.tsx
+@@ -97,7 +97,7 @@ function formatRiskScore(value: unknown): string {
+ 
+ export function AIInvestigationPage() {
+   const location = useLocation();
+-  const { setLastViewed, availableEmails } = useActiveCase();
++  const { setLastViewed, availableEmails, getEmail } = useActiveCase();
+ 
+   const [aiSelectedEmailId, setAiSelectedEmailId] =
+     useState<string | null>(
+@@ -161,15 +161,12 @@ export function AIInvestigationPage() {
+     setLastViewed(emailId);
+   };
+ 
+-  const headerEmailContext = activeEmailData
+-    ? {
+-        id: activeEmailData.emailId,
+-        subject:
+-          activeEmailData.parsedEmail?.subject ||
+-          'No Subject',
+-        caseId: activeEmailData.caseId,
+-      }
+-    : null;
++  // Use the real, already-fetched lightweight record from availableEmails —
++  // never a fabricated stub — so InvestigationShell/CaseSelector always
++  // receive a complete ScannedEmail (or null, which they render safely).
++const headerEmailContext = activeEmailData
++    ? getEmail(activeEmailData.emailId)
++    : null;
+ 
+   return (
+     <InvestigationShell
+@@ -195,7 +192,7 @@ export function AIInvestigationPage() {
+         ) : undefined
+       }
+       hideCaseSelector={!activeEmailData}
+-      selectedEmail={headerEmailContext as any}
++      selectedEmail={headerEmailContext}
+       availableEmails={availableEmails}
+       onSelectEmail={handleSelectEmail}
+       onClearEmail={() => setAiSelectedEmailId(null)}
+diff --git a/FRONTEND/src/pages/IndicatorsPage.tsx b/FRONTEND/src/pages/IndicatorsPage.tsx
+index cff0dfd..0d49e18 100644
+--- a/FRONTEND/src/pages/IndicatorsPage.tsx
++++ b/FRONTEND/src/pages/IndicatorsPage.tsx
+@@ -180,7 +180,7 @@ function getIocDetailFields(ioc: ThreatIndicator, emailData: any): DetailField[]
+ 
+ export function IndicatorsPage() {
+   const location = useLocation();
+-  const { setLastViewed, availableEmails } = useActiveCase();
++  const { setLastViewed, availableEmails, getEmail } = useActiveCase();
+   
+   const [indicatorsSelectedEmailId, setIndicatorsSelectedEmailId] = useState<string | null>(
+     (location.state as { emailId?: string } | null)?.emailId ?? null
+@@ -266,11 +266,10 @@ export function IndicatorsPage() {
+ 
+   const uniqueTypes = new Set(liveIndicators.map((i) => i.type)).size;
+   
+-  const headerEmailContext = activeEmailData ? {
+-    id: activeEmailData.emailId,
+-    subject: activeEmailData.parsedEmail?.subject || 'No Subject',
+-    caseId: activeEmailData.caseId
+-  } : null;
++  // Use the real, already-fetched lightweight record from availableEmails —
++  // never a fabricated stub — so InvestigationShell/CaseSelector always
++  // receive a complete ScannedEmail (or null, which they render safely).
++  const headerEmailContext = activeEmailData ? getEmail(activeEmailData.emailId) : null;
+ 
+   return (
+     <InvestigationShell
+@@ -278,7 +277,7 @@ export function IndicatorsPage() {
+       title="Indicators of Compromise"
+       subtitle={activeEmailData ? `${stats.total} indicators across ${uniqueTypes} types · ${activeEmailData.emailId}` : undefined}
+       hideCaseSelector={!activeEmailData}
+-      selectedEmail={headerEmailContext as any}
++      selectedEmail={headerEmailContext}
+       availableEmails={availableEmails}
+       onSelectEmail={(id) => { setIndicatorsSelectedEmailId(id); setLastViewed(id); setDrawerIoc(null); }}
+       onClearEmail={() => { setIndicatorsSelectedEmailId(null); setDrawerIoc(null); }}
+diff --git a/FRONTEND/src/pages/InfrastructurePage.tsx b/FRONTEND/src/pages/InfrastructurePage.tsx
+index e8c4bb0..b7dbc75 100644
+--- a/FRONTEND/src/pages/InfrastructurePage.tsx
++++ b/FRONTEND/src/pages/InfrastructurePage.tsx
+@@ -125,7 +125,7 @@ function mapDetailedApiToInfrastructure(apiData: any) {
+ 
+ export function InfrastructurePage() {
+   const location = useLocation();
+-  const { setLastViewed, availableEmails } = useActiveCase();
++  const { setLastViewed, availableEmails, getEmail } = useActiveCase();
+   
+   const [infrastructureSelectedEmailId, setInfrastructureSelectedEmailId] = useState<string | null>(
+     (location.state as { emailId?: string } | null)?.emailId ?? null
+@@ -182,11 +182,10 @@ export function InfrastructurePage() {
+   const candidateGeo = geoData.filter((g) => !(g.lat === 0 && g.lon === 0));
+   const unresolvedGeo = geoData.filter((g) => g.lat === 0 && g.lon === 0);
+ 
+-  const headerEmailContext = activeEmailData ? {
+-    id: activeEmailData.emailId,
+-    subject: activeEmailData.parsedEmail?.subject || 'No Subject',
+-    caseId: activeEmailData.caseId
+-  } : null;
++  // Use the real, already-fetched lightweight record from availableEmails —
++  // never a fabricated stub — so InvestigationShell/CaseSelector always
++  // receive a complete ScannedEmail (or null, which they render safely).
++  const headerEmailContext = activeEmailData ? getEmail(activeEmailData.emailId) : null;
+ 
+   return (
+     <InvestigationShell
+@@ -194,7 +193,7 @@ export function InfrastructurePage() {
+       title="Infrastructure Analysis"
+       subtitle={activeEmailData ? `Relationships, geolocation, and probable infrastructure · ${activeEmailData.emailId}` : undefined}
+       hideCaseSelector={!activeEmailData}
+-      selectedEmail={headerEmailContext as any}
++      selectedEmail={headerEmailContext}
+       availableEmails={availableEmails}
+       onSelectEmail={(id) => { setInfrastructureSelectedEmailId(id); setLastViewed(id); }}
+       onClearEmail={() => setInfrastructureSelectedEmailId(null)}
+diff --git a/FRONTEND/src/pages/OverviewPage.tsx b/FRONTEND/src/pages/OverviewPage.tsx
+index 9730a24..4cb1ff6 100644
+--- a/FRONTEND/src/pages/OverviewPage.tsx
++++ b/FRONTEND/src/pages/OverviewPage.tsx
+@@ -248,6 +248,7 @@ const stats = useMemo(() => ({
+                       onSelect={() => handleSelect(email)}
+                       onInspect={() => handleInspect(email)}
+                       onReport={() => handleReport(email)}
++                      onDoubleClick={() => handleInspect(email)}
+                     />
+                   ))}
+                 </tbody>
+@@ -309,12 +310,14 @@ function EmailRow({
+   onSelect,
+   onInspect,
+   onReport,
++  onDoubleClick,
+ }: {
+   email: ScannedEmail;
+   isSelected: boolean;
+   onSelect: () => void;
+   onInspect: () => void;
+   onReport: () => void;
++  onDoubleClick?: () => void;
+ }) {
+   const config = statusConfig[email.status];
+   const scoreColor =
+@@ -333,6 +336,7 @@ function EmailRow({
+   return (
+     <tr
+       onClick={onSelect}
++      onDoubleClick={onDoubleClick}
+       className={cn(
+         'border-b border-base-500/10 hover:bg-base-700/30 transition-colors cursor-pointer group',
+         isSelected && 'bg-base-700/40',
+-- 
+2.43.0
+

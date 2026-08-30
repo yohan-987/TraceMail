@@ -255,6 +255,8 @@ export interface GeoIpRecord {
   country: string | null;
   region: string | null;
   city: string | null;
+  latitude: number | null;
+  longitude: number | null;
   isp: string | null;
   asn: string | null;
   organization: string | null;
