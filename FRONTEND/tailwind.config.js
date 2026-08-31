@@ -4,18 +4,24 @@ export default {
   theme: {
     extend: {
       colors: {
+        // base/ink are CSS-variable-backed (see index.css :root / .light)
+        // so the SAME utility classes (bg-base-800, text-ink-500, etc.)
+        // resolve to dark-theme or light-theme values depending on the
+        // `.light` class on <html> — no component changes needed to
+        // support theming. accent stays a fixed restrained red in both
+        // themes (identity color, not surface/text).
         base: {
-          950: '#080808',
-          900: '#0A0A0A',
-          850: '#0D0D0D',
-          800: '#111111',
-          750: '#141414',
-          700: '#151515',
-          650: '#181818',
-          600: '#1C1C1C',
-          500: '#222222',
-          400: '#2A2A2A',
-          300: '#333333',
+          950: 'rgb(var(--base-950) / <alpha-value>)',
+          900: 'rgb(var(--base-900) / <alpha-value>)',
+          850: 'rgb(var(--base-850) / <alpha-value>)',
+          800: 'rgb(var(--base-800) / <alpha-value>)',
+          750: 'rgb(var(--base-750) / <alpha-value>)',
+          700: 'rgb(var(--base-700) / <alpha-value>)',
+          650: 'rgb(var(--base-650) / <alpha-value>)',
+          600: 'rgb(var(--base-600) / <alpha-value>)',
+          500: 'rgb(var(--base-500) / <alpha-value>)',
+          400: 'rgb(var(--base-400) / <alpha-value>)',
+          300: 'rgb(var(--base-300) / <alpha-value>)',
         },
         accent: {
           50: '#FEF2F2',
@@ -30,14 +36,14 @@ export default {
           900: '#8B0808',
         },
         ink: {
-          50: '#FAFAFA',
-          100: '#F5F5F5',
-          200: '#E5E5E5',
-          300: '#D4D4D4',
-          400: '#A3A3A3',
-          500: '#737373',
-          600: '#525252',
-          700: '#404040',
+          50: 'rgb(var(--ink-50) / <alpha-value>)',
+          100: 'rgb(var(--ink-100) / <alpha-value>)',
+          200: 'rgb(var(--ink-200) / <alpha-value>)',
+          300: 'rgb(var(--ink-300) / <alpha-value>)',
+          400: 'rgb(var(--ink-400) / <alpha-value>)',
+          500: 'rgb(var(--ink-500) / <alpha-value>)',
+          600: 'rgb(var(--ink-600) / <alpha-value>)',
+          700: 'rgb(var(--ink-700) / <alpha-value>)',
         },
       },
       fontFamily: {

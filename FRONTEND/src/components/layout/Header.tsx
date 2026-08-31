@@ -1,5 +1,9 @@
-import { Search, Bell, User, ChevronRight } from 'lucide-react';
+import { Sun, Moon, ChevronRight } from 'lucide-react';
 import { useActiveCase } from '@/context/ActiveCaseContext';
+import { useTheme } from '@/context/ThemeContext';
+import { GlobalSearch } from '@/components/GlobalSearch';
+import { NotificationsPanel } from '@/components/NotificationsPanel';
+import { ProfilePanel } from '@/components/ProfilePanel';
 
 export function Header() {
   // There is no global "active case" in this app — each investigation page
@@ -7,6 +11,7 @@ export function Header() {
   // "last viewed" convenience pointer, purely for orientation.
   const { lastViewedEmail } = useActiveCase();
   const hasLastViewed = lastViewedEmail !== null && lastViewedEmail !== undefined;
+  const { theme, toggleTheme } = useTheme();
 
   return (
     <header className="sticky top-0 z-20 h-14 flex items-center justify-between px-6 bg-base-950/80 backdrop-blur-md border-b border-base-500/30 print:hidden">
@@ -32,23 +37,18 @@ export function Header() {
       </div>
 
       <div className="flex items-center gap-1 shrink-0">
-        <button className="flex items-center justify-center w-8 h-8 rounded-lg text-ink-500 hover:text-ink-200 hover:bg-base-800/60 transition-colors">
-          <Search className="w-4 h-4" />
+        <button
+          onClick={toggleTheme}
+          aria-label="Toggle theme"
+          title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          className="flex items-center justify-center w-8 h-8 rounded-lg text-ink-500 hover:text-ink-200 hover:bg-base-800/60 transition-colors"
+        >
+          {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
         </button>
-        <button className="relative flex items-center justify-center w-8 h-8 rounded-lg text-ink-500 hover:text-ink-200 hover:bg-base-800/60 transition-colors">
-          <Bell className="w-4 h-4" />
-          <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-accent-600 accent-glow-sm" />
-        </button>
+        <GlobalSearch />
+        <NotificationsPanel />
         <div className="w-px h-5 bg-base-500/30 mx-2" />
-        <button className="flex items-center gap-2 pl-1 pr-3 py-1 rounded-lg hover:bg-base-800/60 transition-colors">
-          <div className="flex items-center justify-center w-7 h-7 rounded-md bg-base-700 border border-base-500/40">
-            <User className="w-3.5 h-3.5 text-ink-400" />
-          </div>
-          <div className="flex flex-col items-start">
-            <span className="text-[11px] font-medium text-ink-200 leading-none">M. Chen</span>
-            <span className="text-[9px] text-ink-600 leading-none mt-0.5">Analyst L3</span>
-          </div>
-        </button>
+        <ProfilePanel />
       </div>
     </header>
   );

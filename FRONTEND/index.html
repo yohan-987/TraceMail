@@ -12,6 +12,25 @@
     <meta property="og:image" content="https://bolt.new/static/og_default.png" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:image" content="https://bolt.new/static/og_default.png" />
+    <script>
+      // Applied before React mounts to avoid a dark->light flash on
+      // load. Mirrors the persistence key in ThemeContext.tsx — kept
+      // in sync manually since this must run before any bundle loads.
+      (function () {
+        try {
+          var stored = window.localStorage.getItem('sih26106.theme');
+          var theme =
+            stored === 'light' || stored === 'dark'
+              ? stored
+              : window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+              ? 'light'
+              : 'dark';
+          if (theme === 'light') document.documentElement.classList.add('light');
+        } catch (e) {
+          // localStorage unavailable (private browsing, etc.) — fall back to dark.
+        }
+      })();
+    </script>
   </head>
   <body class="bg-base-950 text-ink-100">
     <div id="root"></div>

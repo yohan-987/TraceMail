@@ -1,0 +1,1363 @@
+diff --git a/FRONTEND/index.html b/FRONTEND/index.html
+index e5eb07e..3346f6c 100644
+--- a/FRONTEND/index.html
++++ b/FRONTEND/index.html
+@@ -12,6 +12,25 @@
+     <meta property="og:image" content="https://bolt.new/static/og_default.png" />
+     <meta name="twitter:card" content="summary_large_image" />
+     <meta name="twitter:image" content="https://bolt.new/static/og_default.png" />
++    <script>
++      // Applied before React mounts to avoid a dark->light flash on
++      // load. Mirrors the persistence key in ThemeContext.tsx — kept
++      // in sync manually since this must run before any bundle loads.
++      (function () {
++        try {
++          var stored = window.localStorage.getItem('sih26106.theme');
++          var theme =
++            stored === 'light' || stored === 'dark'
++              ? stored
++              : window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
++              ? 'light'
++              : 'dark';
++          if (theme === 'light') document.documentElement.classList.add('light');
++        } catch (e) {
++          // localStorage unavailable (private browsing, etc.) — fall back to dark.
++        }
++      })();
++    </script>
+   </head>
+   <body class="bg-base-950 text-ink-100">
+     <div id="root"></div>
+diff --git a/FRONTEND/src/App.tsx b/FRONTEND/src/App.tsx
+index 0896339..daf79bb 100644
+--- a/FRONTEND/src/App.tsx
++++ b/FRONTEND/src/App.tsx
+@@ -1,5 +1,6 @@
+ import { BrowserRouter, Routes, Route } from 'react-router-dom';
+ import { ActiveCaseProvider } from '@/context/ActiveCaseContext';
++import { ThemeProvider } from '@/context/ThemeContext';
+ import { Layout } from '@/components/layout/Layout';
+ import { OverviewPage } from '@/pages/OverviewPage';
+ import { ScannerPage } from '@/pages/ScannerPage';
+@@ -13,22 +14,24 @@ import { ReportsPage } from '@/pages/ReportsPage';
+ 
+ export default function App() {
+   return (
+-    <BrowserRouter>
+-      <ActiveCaseProvider>
+-        <Routes>
+-          <Route path="/" element={<Layout />}>
+-            <Route index element={<OverviewPage />} />
+-            <Route path="scanner" element={<ScannerPage />} />
+-            <Route path="investigation" element={<InvestigationPage />} />
+-            <Route path="forensics" element={<ForensicsPage />} />
+-            <Route path="indicators" element={<IndicatorsPage />} />
+-            <Route path="infrastructure" element={<InfrastructurePage />} />
+-            <Route path="ai-investigation" element={<AIInvestigationPage />} />
+-            <Route path="cases" element={<CasesPage />} />
+-            <Route path="reports" element={<ReportsPage />} />
+-          </Route>
+-        </Routes>
+-      </ActiveCaseProvider>
+-    </BrowserRouter>
++    <ThemeProvider>
++      <BrowserRouter>
++        <ActiveCaseProvider>
++          <Routes>
++            <Route path="/" element={<Layout />}>
++              <Route index element={<OverviewPage />} />
++              <Route path="scanner" element={<ScannerPage />} />
++              <Route path="investigation" element={<InvestigationPage />} />
++              <Route path="forensics" element={<ForensicsPage />} />
++              <Route path="indicators" element={<IndicatorsPage />} />
++              <Route path="infrastructure" element={<InfrastructurePage />} />
++              <Route path="ai-investigation" element={<AIInvestigationPage />} />
++              <Route path="cases" element={<CasesPage />} />
++              <Route path="reports" element={<ReportsPage />} />
++            </Route>
++          </Routes>
++        </ActiveCaseProvider>
++      </BrowserRouter>
++    </ThemeProvider>
+   );
+ }
+\ No newline at end of file
+diff --git a/FRONTEND/src/api/api.ts b/FRONTEND/src/api/api.ts
+index f9ea7c4..a6d5318 100644
+--- a/FRONTEND/src/api/api.ts
++++ b/FRONTEND/src/api/api.ts
+@@ -46,16 +46,36 @@ export interface ApiEmailDetail {
+     score?: number | null;
+     level?: string | null;
+     classification?: string | null;
++    /** Fraction 0-1 — corroboration across independent categories, not a calibrated probability. */
++    confidence?: number | null;
++    /** Fraction 0-1 — how many of the five risk categories were AVAILABLE. */
++    evidenceCoverage?: number | null;
++    categoryScores?: Record<
++      string,
++      { score: number | null; status: string; evidence?: Array<{ message: string }> }
++    > | null;
++    status?: string;
+   } | null;
+   mlAssessment?: {
++    model?: string | null;
++    modelVersion?: string | null;
++    classification?: string | null;
+     probability?: number | null;
+     status?: string;
+   } | null;
+   aiAssessment?: {
+     summary?: string | null;
+     attackType?: string | null;
++    phishingIntent?: number | null;
++    credentialHarvesting?: number | null;
++    financialFraud?: number | null;
++    impersonation?: number | null;
++    socialEngineering?: number | null;
++    aiContentScore?: number | null;
++    recommendedActions?: Array<string | { action?: string; reason?: string }>;
+     status?: string;
+   } | null;
++  iocs?: { ips?: string[]; domains?: string[]; urls?: string[]; hashes?: string[]; emails?: string[] } | null;
+   explanations?: Array<{ message: string }>;
+   recommendations?: ApiRecommendation[];
+ }
+diff --git a/FRONTEND/src/components/GlobalSearch.tsx b/FRONTEND/src/components/GlobalSearch.tsx
+new file mode 100644
+index 0000000..44b1c30
+--- /dev/null
++++ b/FRONTEND/src/components/GlobalSearch.tsx
+@@ -0,0 +1,157 @@
++import { useState, useEffect, useRef } from 'react';
++import { useNavigate } from 'react-router-dom';
++import { Search, X, Loader2 } from 'lucide-react';
++import { getEmails } from '@/api/api';
++import { mapApiEmailToUiEmail } from '@/api/emailMapper';
++import type { ScannedEmail } from '@/data/mockData';
++import { cn } from '@/lib/utils';
++
++/**
++ * Global search — queries the real GET /api/v1/emails?search=... list
++ * endpoint (backend already matches sender/senderDomain/subject/
++ * recipient/emailId/caseId server-side per emailQuery.ts). Never a
++ * second/local search dataset. Selecting a result opens the full
++ * Investigation Overview for that email, same as every other
++ * "Investigate" action in the app.
++ */
++export function GlobalSearch() {
++  const navigate = useNavigate();
++  const [open, setOpen] = useState(false);
++  const [query, setQuery] = useState('');
++  const [results, setResults] = useState<ScannedEmail[]>([]);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const containerRef = useRef<HTMLDivElement>(null);
++  const inputRef = useRef<HTMLInputElement>(null);
++
++  useEffect(() => {
++    if (!open) return;
++    inputRef.current?.focus();
++  }, [open]);
++
++  useEffect(() => {
++    function onOutside(e: MouseEvent) {
++      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
++        setOpen(false);
++      }
++    }
++    function onEscape(e: KeyboardEvent) {
++      if (e.key === 'Escape') setOpen(false);
++    }
++    document.addEventListener('mousedown', onOutside);
++    document.addEventListener('keydown', onEscape);
++    return () => {
++      document.removeEventListener('mousedown', onOutside);
++      document.removeEventListener('keydown', onEscape);
++    };
++  }, []);
++
++  useEffect(() => {
++    const trimmed = query.trim();
++    if (trimmed === '') {
++      setResults([]);
++      setError(null);
++      setLoading(false);
++      return;
++    }
++    let cancelled = false;
++    setLoading(true);
++    setError(null);
++    const timer = setTimeout(() => {
++      getEmails({ search: trimmed, limit: 8 })
++        .then((res) => {
++          if (cancelled) return;
++          setResults(res.items.map((item) => mapApiEmailToUiEmail(item)));
++        })
++        .catch((err) => {
++          if (cancelled) return;
++          setError(err instanceof Error ? err.message : 'Search failed');
++          setResults([]);
++        })
++        .finally(() => {
++          if (!cancelled) setLoading(false);
++        });
++    }, 250);
++    return () => {
++      cancelled = true;
++      clearTimeout(timer);
++    };
++  }, [query]);
++
++  const openEmail = (email: ScannedEmail) => {
++    setOpen(false);
++    setQuery('');
++    navigate('/investigation', { state: { emailId: email.id } });
++  };
++
++  return (
++    <div className="relative" ref={containerRef}>
++      <button
++        onClick={() => setOpen((v) => !v)}
++        aria-label="Search emails"
++        className={cn(
++          'flex items-center justify-center w-8 h-8 rounded-lg transition-colors',
++          open ? 'text-ink-100 bg-base-800' : 'text-ink-500 hover:text-ink-200 hover:bg-base-800/60'
++        )}
++      >
++        <Search className="w-4 h-4" />
++      </button>
++
++      {open && (
++        <div className="absolute right-0 mt-2 w-80 rounded-xl border border-base-500/40 bg-base-800/95 backdrop-blur-md shadow-2xl overflow-hidden z-30 animate-fade-in">
++          <div className="flex items-center gap-2 px-3 py-2.5 border-b border-base-500/30">
++            <Search className="w-3.5 h-3.5 text-ink-500 shrink-0" />
++            <input
++              ref={inputRef}
++              value={query}
++              onChange={(e) => setQuery(e.target.value)}
++              placeholder="Sender, domain, subject, emailId, caseId..."
++              className="flex-1 bg-transparent text-[12px] text-ink-100 placeholder:text-ink-600 outline-none"
++            />
++            {query && (
++              <button onClick={() => setQuery('')} className="text-ink-600 hover:text-ink-300">
++                <X className="w-3.5 h-3.5" />
++              </button>
++            )}
++          </div>
++
++          <div className="max-h-80 overflow-y-auto scrollbar-thin">
++            {loading ? (
++              <div className="flex items-center justify-center gap-2 py-6 text-[11px] text-ink-500">
++                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Searching...
++              </div>
++            ) : error ? (
++              <div className="py-6 text-center text-[11px] text-accent-500">{error}</div>
++            ) : query.trim() === '' ? (
++              <div className="py-6 text-center text-[11px] text-ink-600">
++                Search by sender, domain, subject, recipient, email ID, or case ID.
++              </div>
++            ) : results.length === 0 ? (
++              <div className="py-6 text-center text-[11px] text-ink-600">No matching emails.</div>
++            ) : (
++              results.map((email) => (
++                <button
++                  key={email.id}
++                  onClick={() => openEmail(email)}
++                  className="w-full text-left px-3 py-2.5 hover:bg-base-700/50 border-b border-base-500/15 last:border-b-0 transition-colors"
++                >
++                  <div className="flex items-center justify-between gap-2">
++                    <span className="text-[12px] font-medium text-ink-200 truncate">
++                      {email.subject || 'No Subject'}
++                    </span>
++                    <span className="mono text-[9px] text-ink-600 shrink-0">{email.classification}</span>
++                  </div>
++                  <div className="flex items-center gap-1.5 mt-0.5 text-[10px] text-ink-500 truncate">
++                    <span className="mono">{email.sender || 'unknown sender'}</span>
++                    <span className="text-ink-700">·</span>
++                    <span className="mono">{email.caseId || email.id}</span>
++                  </div>
++                </button>
++              ))
++            )}
++          </div>
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/FRONTEND/src/components/NotificationsPanel.tsx b/FRONTEND/src/components/NotificationsPanel.tsx
+new file mode 100644
+index 0000000..77bcba4
+--- /dev/null
++++ b/FRONTEND/src/components/NotificationsPanel.tsx
+@@ -0,0 +1,214 @@
++import { useState, useEffect, useRef, useMemo } from 'react';
++import { useNavigate } from 'react-router-dom';
++import { Bell, ShieldAlert, ScanLine, Brain, Radar, CheckCheck } from 'lucide-react';
++import { useActiveCase } from '@/context/ActiveCaseContext';
++import type { ScannedEmail } from '@/data/mockData';
++import { cn } from '@/lib/utils';
++
++type NotificationKind =
++  | 'critical_threat'
++  | 'new_scan'
++  | 'ai_unavailable'
++  | 'ml_unavailable';
++
++interface AppNotification {
++  id: string;
++  kind: NotificationKind;
++  title: string;
++  message: string;
++  timestamp: string;
++  emailId: string;
++}
++
++const KIND_META: Record<NotificationKind, { icon: typeof Bell; color: string }> = {
++  critical_threat: { icon: ShieldAlert, color: 'text-accent-400 bg-accent-700/10 border-accent-700/25' },
++  new_scan: { icon: ScanLine, color: 'text-sky-400 bg-sky-900/10 border-sky-700/25' },
++  ai_unavailable: { icon: Brain, color: 'text-amber-400 bg-amber-900/10 border-amber-700/25' },
++  ml_unavailable: { icon: Radar, color: 'text-ink-400 bg-ink-800/20 border-ink-600/25' },
++};
++
++const READ_STORAGE_KEY = 'sih26106.notifications.read';
++
++function loadReadIds(): Set<string> {
++  try {
++    const raw = window.localStorage.getItem(READ_STORAGE_KEY);
++    if (!raw) return new Set();
++    const arr = JSON.parse(raw);
++    return new Set(Array.isArray(arr) ? arr : []);
++  } catch {
++    return new Set();
++  }
++}
++
++/**
++ * Derived entirely from real, already-fetched application data
++ * (availableEmails, via ActiveCaseContext) — no push infrastructure,
++ * no fabricated events, no second dataset. Read/unread state persists
++ * locally so it survives a refresh; it is purely a client-side
++ * convenience, same as the theme preference.
++ */
++function buildNotifications(emails: ScannedEmail[]): AppNotification[] {
++  const notifications: AppNotification[] = [];
++
++  // Most recently scanned email.
++  const mostRecent = emails[0];
++  if (mostRecent) {
++    notifications.push({
++      id: `new_scan:${mostRecent.id}`,
++      kind: 'new_scan',
++      title: 'New email scanned',
++      message: `${mostRecent.subject || 'No subject'} — ${mostRecent.classification}`,
++      timestamp: mostRecent.date,
++      emailId: mostRecent.id,
++    });
++  }
++
++  for (const email of emails) {
++    if (email.status === 'malicious' || email.riskLevel?.toLowerCase() === 'critical') {
++      notifications.push({
++        id: `critical_threat:${email.id}`,
++        kind: 'critical_threat',
++        title: 'Critical threat detected',
++        message: `${email.subject || 'No subject'} — score ${email.threatScore}`,
++        timestamp: email.date,
++        emailId: email.id,
++      });
++    }
++    if (email.aiStatus && String(email.aiStatus).toUpperCase() === 'UNAVAILABLE') {
++      notifications.push({
++        id: `ai_unavailable:${email.id}`,
++        kind: 'ai_unavailable',
++        title: 'AI analysis unavailable',
++        message: `${email.subject || 'No subject'} — AI interpretation could not be produced`,
++        timestamp: email.date,
++        emailId: email.id,
++      });
++    }
++    if (email.mlStatus && String(email.mlStatus).toUpperCase() === 'UNAVAILABLE') {
++      notifications.push({
++        id: `ml_unavailable:${email.id}`,
++        kind: 'ml_unavailable',
++        title: 'External intelligence unavailable',
++        message: `${email.subject || 'No subject'} — ML classifier produced no result`,
++        timestamp: email.date,
++        emailId: email.id,
++      });
++    }
++  }
++
++  // Most recent first, capped so the panel stays scannable.
++  return notifications
++    .sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))
++    .slice(0, 15);
++}
++
++export function NotificationsPanel() {
++  const navigate = useNavigate();
++  const { availableEmails } = useActiveCase();
++  const [open, setOpen] = useState(false);
++  const [readIds, setReadIds] = useState<Set<string>>(() => loadReadIds());
++  const containerRef = useRef<HTMLDivElement>(null);
++
++  const notifications = useMemo(() => buildNotifications(availableEmails), [availableEmails]);
++  const unreadCount = notifications.filter((n) => !readIds.has(n.id)).length;
++
++  useEffect(() => {
++    window.localStorage.setItem(READ_STORAGE_KEY, JSON.stringify(Array.from(readIds)));
++  }, [readIds]);
++
++  useEffect(() => {
++    function onOutside(e: MouseEvent) {
++      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
++        setOpen(false);
++      }
++    }
++    document.addEventListener('mousedown', onOutside);
++    return () => document.removeEventListener('mousedown', onOutside);
++  }, []);
++
++  const markAllRead = () => {
++    setReadIds(new Set(notifications.map((n) => n.id)));
++  };
++
++  const openNotification = (n: AppNotification) => {
++    setReadIds((prev) => new Set(prev).add(n.id));
++    setOpen(false);
++    navigate('/investigation', { state: { emailId: n.emailId } });
++  };
++
++  return (
++    <div className="relative" ref={containerRef}>
++      <button
++        onClick={() => setOpen((v) => !v)}
++        aria-label="Notifications"
++        className={cn(
++          'relative flex items-center justify-center w-8 h-8 rounded-lg transition-colors',
++          open ? 'text-ink-100 bg-base-800' : 'text-ink-500 hover:text-ink-200 hover:bg-base-800/60'
++        )}
++      >
++        <Bell className="w-4 h-4" />
++        {unreadCount > 0 && (
++          <span className="absolute top-1 right-1 min-w-[13px] h-[13px] px-[3px] rounded-full bg-accent-600 accent-glow-sm text-[8px] font-bold text-white flex items-center justify-center leading-none">
++            {unreadCount > 9 ? '9+' : unreadCount}
++          </span>
++        )}
++      </button>
++
++      {open && (
++        <div className="absolute right-0 mt-2 w-96 rounded-xl border border-base-500/40 bg-base-800/95 backdrop-blur-md shadow-2xl overflow-hidden z-30 animate-fade-in">
++          <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-base-500/30">
++            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-ink-400">
++              Notifications
++            </span>
++            {unreadCount > 0 && (
++              <button
++                onClick={markAllRead}
++                className="flex items-center gap-1 text-[10px] font-medium text-accent-400 hover:text-accent-300 transition-colors"
++              >
++                <CheckCheck className="w-3 h-3" /> Mark all as read
++              </button>
++            )}
++          </div>
++
++          <div className="max-h-96 overflow-y-auto scrollbar-thin">
++            {notifications.length === 0 ? (
++              <div className="py-8 text-center text-[11px] text-ink-600">
++                No notifications yet — scan an email to get started.
++              </div>
++            ) : (
++              notifications.map((n) => {
++                const meta = KIND_META[n.kind];
++                const Icon = meta.icon;
++                const isRead = readIds.has(n.id);
++                return (
++                  <button
++                    key={n.id}
++                    onClick={() => openNotification(n)}
++                    className={cn(
++                      'w-full text-left px-3.5 py-3 flex items-start gap-2.5 border-b border-base-500/15 last:border-b-0 transition-colors hover:bg-base-700/40',
++                      !isRead && 'bg-base-700/20'
++                    )}
++                  >
++                    <div className={cn('flex items-center justify-center w-7 h-7 rounded-lg border shrink-0 mt-0.5', meta.color)}>
++                      <Icon className="w-3.5 h-3.5" />
++                    </div>
++                    <div className="min-w-0 flex-1">
++                      <div className="flex items-center gap-1.5">
++                        <span className={cn('text-[12px] leading-snug', isRead ? 'text-ink-300' : 'text-ink-100 font-semibold')}>
++                          {n.title}
++                        </span>
++                        {!isRead && <span className="w-1.5 h-1.5 rounded-full bg-accent-500 shrink-0" />}
++                      </div>
++                      <div className="text-[11px] text-ink-500 truncate mt-0.5">{n.message}</div>
++                      <div className="mono text-[9px] text-ink-600 mt-1">{n.timestamp || 'unknown time'}</div>
++                    </div>
++                  </button>
++                );
++              })
++            )}
++          </div>
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/FRONTEND/src/components/ProfilePanel.tsx b/FRONTEND/src/components/ProfilePanel.tsx
+new file mode 100644
+index 0000000..f63ee1a
+--- /dev/null
++++ b/FRONTEND/src/components/ProfilePanel.tsx
+@@ -0,0 +1,95 @@
++import { useState, useEffect, useRef } from 'react';
++import { User, Sun, Moon, ShieldQuestion } from 'lucide-react';
++import { useTheme } from '@/context/ThemeContext';
++import { cn } from '@/lib/utils';
++
++/**
++ * A local/demo profile only — there is no authentication in this app
++ * (Part C.3: "Do NOT add authentication... Clearly label this as a
++ * local/demo profile. Do not pretend it represents an authenticated
++ * account."). Analyst name/role/workspace are static demo values, not
++ * backend-sourced identity; theme is the one genuinely live value.
++ */
++const DEMO_PROFILE = {
++  analystName: 'M. Chen',
++  role: 'Analyst L3',
++  workspace: 'SIH26106 — Email Threat Detection',
++};
++
++export function ProfilePanel() {
++  const { theme, toggleTheme } = useTheme();
++  const [open, setOpen] = useState(false);
++  const containerRef = useRef<HTMLDivElement>(null);
++
++  useEffect(() => {
++    function onOutside(e: MouseEvent) {
++      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
++        setOpen(false);
++      }
++    }
++    document.addEventListener('mousedown', onOutside);
++    return () => document.removeEventListener('mousedown', onOutside);
++  }, []);
++
++  return (
++    <div className="relative" ref={containerRef}>
++      <button
++        onClick={() => setOpen((v) => !v)}
++        className={cn(
++          'flex items-center gap-2 pl-1 pr-3 py-1 rounded-lg transition-colors',
++          open ? 'bg-base-800' : 'hover:bg-base-800/60'
++        )}
++      >
++        <div className="flex items-center justify-center w-7 h-7 rounded-md bg-base-700 border border-base-500/40">
++          <User className="w-3.5 h-3.5 text-ink-400" />
++        </div>
++        <div className="flex flex-col items-start">
++          <span className="text-[11px] font-medium text-ink-200 leading-none">{DEMO_PROFILE.analystName}</span>
++          <span className="text-[9px] text-ink-600 leading-none mt-0.5">{DEMO_PROFILE.role}</span>
++        </div>
++      </button>
++
++      {open && (
++        <div className="absolute right-0 mt-2 w-72 rounded-xl border border-base-500/40 bg-base-800/95 backdrop-blur-md shadow-2xl overflow-hidden z-30 animate-fade-in">
++          <div className="flex items-center gap-2 px-3.5 py-2.5 border-b border-base-500/30 bg-amber-900/10">
++            <ShieldQuestion className="w-3.5 h-3.5 text-amber-400 shrink-0" />
++            <span className="text-[10px] font-semibold text-amber-400 uppercase tracking-wider">
++              Local / Demo Profile — Not an Authenticated Account
++            </span>
++          </div>
++
++          <div className="p-3.5 space-y-3">
++            <ProfileField label="Analyst Name" value={DEMO_PROFILE.analystName} />
++            <ProfileField label="Role" value={DEMO_PROFILE.role} />
++            <ProfileField label="Workspace" value={DEMO_PROFILE.workspace} />
++
++            <div className="panel-2 p-2.5 flex items-center justify-between">
++              <div>
++                <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-0.5">
++                  Current Theme
++                </div>
++                <div className="text-[12px] text-ink-200 capitalize">{theme}</div>
++              </div>
++              <button
++                onClick={toggleTheme}
++                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[10px] font-medium text-ink-300 bg-base-700/60 border border-base-500/30 hover:bg-base-700 transition-colors uppercase tracking-wider"
++              >
++                {theme === 'dark' ? <Sun className="w-3 h-3" /> : <Moon className="w-3 h-3" />}
++                Switch
++              </button>
++            </div>
++          </div>
++        </div>
++      )}
++    </div>
++  );
++}
++
++function ProfileField({ label, value }: { label: string; value: string }) {
++  return (
++    <div className="panel-2 p-2.5">
++      <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-0.5">{label}</div>
++      <div className="text-[12px] text-ink-200">{value}</div>
++    </div>
++  );
++}
+diff --git a/FRONTEND/src/components/layout/Header.tsx b/FRONTEND/src/components/layout/Header.tsx
+index 6f57141..46317ee 100644
+--- a/FRONTEND/src/components/layout/Header.tsx
++++ b/FRONTEND/src/components/layout/Header.tsx
+@@ -1,5 +1,9 @@
+-import { Search, Bell, User, ChevronRight } from 'lucide-react';
++import { Sun, Moon, ChevronRight } from 'lucide-react';
+ import { useActiveCase } from '@/context/ActiveCaseContext';
++import { useTheme } from '@/context/ThemeContext';
++import { GlobalSearch } from '@/components/GlobalSearch';
++import { NotificationsPanel } from '@/components/NotificationsPanel';
++import { ProfilePanel } from '@/components/ProfilePanel';
+ 
+ export function Header() {
+   // There is no global "active case" in this app — each investigation page
+@@ -7,6 +11,7 @@ export function Header() {
+   // "last viewed" convenience pointer, purely for orientation.
+   const { lastViewedEmail } = useActiveCase();
+   const hasLastViewed = lastViewedEmail !== null && lastViewedEmail !== undefined;
++  const { theme, toggleTheme } = useTheme();
+ 
+   return (
+     <header className="sticky top-0 z-20 h-14 flex items-center justify-between px-6 bg-base-950/80 backdrop-blur-md border-b border-base-500/30 print:hidden">
+@@ -32,23 +37,18 @@ export function Header() {
+       </div>
+ 
+       <div className="flex items-center gap-1 shrink-0">
+-        <button className="flex items-center justify-center w-8 h-8 rounded-lg text-ink-500 hover:text-ink-200 hover:bg-base-800/60 transition-colors">
+-          <Search className="w-4 h-4" />
+-        </button>
+-        <button className="relative flex items-center justify-center w-8 h-8 rounded-lg text-ink-500 hover:text-ink-200 hover:bg-base-800/60 transition-colors">
+-          <Bell className="w-4 h-4" />
+-          <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-accent-600 accent-glow-sm" />
++        <button
++          onClick={toggleTheme}
++          aria-label="Toggle theme"
++          title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
++          className="flex items-center justify-center w-8 h-8 rounded-lg text-ink-500 hover:text-ink-200 hover:bg-base-800/60 transition-colors"
++        >
++          {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+         </button>
++        <GlobalSearch />
++        <NotificationsPanel />
+         <div className="w-px h-5 bg-base-500/30 mx-2" />
+-        <button className="flex items-center gap-2 pl-1 pr-3 py-1 rounded-lg hover:bg-base-800/60 transition-colors">
+-          <div className="flex items-center justify-center w-7 h-7 rounded-md bg-base-700 border border-base-500/40">
+-            <User className="w-3.5 h-3.5 text-ink-400" />
+-          </div>
+-          <div className="flex flex-col items-start">
+-            <span className="text-[11px] font-medium text-ink-200 leading-none">M. Chen</span>
+-            <span className="text-[9px] text-ink-600 leading-none mt-0.5">Analyst L3</span>
+-          </div>
+-        </button>
++        <ProfilePanel />
+       </div>
+     </header>
+   );
+diff --git a/FRONTEND/src/components/layout/Layout.tsx b/FRONTEND/src/components/layout/Layout.tsx
+index 7bffd48..7b1dd82 100644
+--- a/FRONTEND/src/components/layout/Layout.tsx
++++ b/FRONTEND/src/components/layout/Layout.tsx
+@@ -1,14 +1,30 @@
+-import { Outlet } from 'react-router-dom';
++import { useEffect, useRef } from 'react';
++import { Outlet, useLocation } from 'react-router-dom';
+ import { Sidebar } from '@/components/layout/Sidebar';
+ import { Header } from '@/components/layout/Header';
+ 
+ export function Layout() {
++  // `main` below is the app's single scroll container (Layout persists
++  // across route changes — only the Outlet's child swaps — so its
++  // scrollTop is NOT reset by the browser the way a full page load
++  // would be). Without this, switching investigation tabs (Overview /
++  // Forensics / Indicators / Infrastructure / AI Investigation /
++  // Report) keeps whatever scroll position the previous tab was left
++  // at. Implemented once here, centrally, rather than duplicated in
++  // every page.
++  const mainRef = useRef<HTMLElement>(null);
++  const location = useLocation();
++
++  useEffect(() => {
++    mainRef.current?.scrollTo({ top: 0 });
++  }, [location.pathname]);
++
+   return (
+     <div className="flex min-h-screen bg-base-950 bg-grid-subtle bg-grid-sm">
+       <Sidebar />
+       <div className="flex-1 flex flex-col min-w-0">
+         <Header />
+-        <main className="flex-1 overflow-y-auto scrollbar-thin">
++        <main ref={mainRef} className="flex-1 overflow-y-auto scrollbar-thin">
+           <Outlet />
+         </main>
+       </div>
+diff --git a/FRONTEND/src/context/ThemeContext.tsx b/FRONTEND/src/context/ThemeContext.tsx
+new file mode 100644
+index 0000000..31c3ac1
+--- /dev/null
++++ b/FRONTEND/src/context/ThemeContext.tsx
+@@ -0,0 +1,67 @@
++import {
++  createContext,
++  useContext,
++  useState,
++  useEffect,
++  useCallback,
++  type ReactNode,
++} from 'react';
++
++/**
++ * Light/dark theme, persisted to localStorage so it survives a page
++ * refresh (Part C.9). There is no backend theme setting — this is
++ * purely a client-side preference. The actual color values live in
++ * index.css as CSS variables (:root = dark, .light = light); this
++ * context only owns which one is active and toggles the `light`
++ * class on <html>.
++ */
++export type Theme = 'dark' | 'light';
++
++const STORAGE_KEY = 'sih26106.theme';
++
++interface ThemeContextValue {
++  theme: Theme;
++  toggleTheme: () => void;
++  setTheme: (theme: Theme) => void;
++}
++
++const ThemeContext = createContext<ThemeContextValue | null>(null);
++
++function getInitialTheme(): Theme {
++  if (typeof window === 'undefined') return 'dark';
++  const stored = window.localStorage.getItem(STORAGE_KEY);
++  if (stored === 'light' || stored === 'dark') return stored;
++  // No stored preference yet — respect the OS-level preference once,
++  // but default to dark (the app's established identity) otherwise.
++  if (window.matchMedia?.('(prefers-color-scheme: light)').matches) {
++    return 'light';
++  }
++  return 'dark';
++}
++
++export function ThemeProvider({ children }: { children: ReactNode }) {
++  const [theme, setThemeState] = useState<Theme>(getInitialTheme);
++
++  useEffect(() => {
++    document.documentElement.classList.toggle('light', theme === 'light');
++    window.localStorage.setItem(STORAGE_KEY, theme);
++  }, [theme]);
++
++  const setTheme = useCallback((next: Theme) => setThemeState(next), []);
++  const toggleTheme = useCallback(
++    () => setThemeState((prev) => (prev === 'dark' ? 'light' : 'dark')),
++    []
++  );
++
++  return (
++    <ThemeContext.Provider value={{ theme, toggleTheme, setTheme }}>
++      {children}
++    </ThemeContext.Provider>
++  );
++}
++
++export function useTheme(): ThemeContextValue {
++  const ctx = useContext(ThemeContext);
++  if (!ctx) throw new Error('useTheme must be used within a ThemeProvider');
++  return ctx;
++}
+diff --git a/FRONTEND/src/index.css b/FRONTEND/src/index.css
+index 4eeeb61..2323b39 100644
+--- a/FRONTEND/src/index.css
++++ b/FRONTEND/src/index.css
+@@ -2,33 +2,110 @@
+ @tailwind components;
+ @tailwind utilities;
+ 
++/*
++ * Theme variables. Values are space-separated RGB triplets so Tailwind's
++ * `rgb(var(--x) / <alpha-value>)` pattern (see tailwind.config.js) can
++ * still apply opacity modifiers like bg-base-800/80. Dark is the
++ * default (:root); .light on <html> overrides it. This is a value
++ * swap only — every existing bg-base-*/text-ink-* class in the app
++ * keeps working unchanged in both themes.
++ */
++:root {
++  /* Dark (default) — near-black background, charcoal panels,
++     off-white primary text, muted gray secondary text. */
++  --base-950: 8 8 8;
++  --base-900: 10 10 10;
++  --base-850: 13 13 13;
++  --base-800: 17 17 17;
++  --base-750: 20 20 20;
++  --base-700: 21 21 21;
++  --base-650: 24 24 24;
++  --base-600: 28 28 28;
++  --base-500: 34 34 34;
++  --base-400: 42 42 42;
++  --base-300: 51 51 51;
++
++  --ink-50: 250 250 250;
++  --ink-100: 245 245 245;
++  --ink-200: 229 229 229;
++  --ink-300: 212 212 212;
++  --ink-400: 163 163 163;
++  --ink-500: 115 115 115;
++  --ink-600: 82 82 82;
++  --ink-700: 64 64 64;
++
++  --hairline: 255 255 255;
++  --hairline-alpha: 0.04;
++  --selection-fg: 255 255 255;
++}
++
++.light {
++  /* Light — neutral light background, white/light panels, dark text,
++     subtle borders, readable secondary text. Deliberately not a
++     straight invert of the dark palette (e.g. text isn't pure black,
++     panels aren't pure white-on-white with no separation). */
++  --base-950: 244 244 246;
++  --base-900: 248 248 249;
++  --base-850: 255 255 255;
++  --base-800: 255 255 255;
++  --base-750: 250 250 251;
++  --base-700: 246 246 247;
++  --base-650: 241 241 243;
++  --base-600: 235 235 238;
++  --base-500: 224 224 228;
++  --base-400: 211 211 216;
++  --base-300: 195 195 201;
++
++  --ink-50: 23 23 26;
++  --ink-100: 34 34 38;
++  --ink-200: 48 48 54;
++  --ink-300: 71 71 79;
++  --ink-400: 96 96 106;
++  --ink-500: 122 122 132;
++  --ink-600: 150 150 159;
++  --ink-700: 182 182 190;
++
++  --hairline: 0 0 0;
++  --hairline-alpha: 0.08;
++  --selection-fg: 255 255 255;
++}
++
+ @layer base {
+   * {
+-    border-color: rgba(255, 255, 255, 0.04);
++    border-color: rgb(var(--hairline) / var(--hairline-alpha));
++  }
++
++  html {
++    color-scheme: dark;
++  }
++
++  html.light {
++    color-scheme: light;
+   }
+ 
+   body {
+-    background-color: #080808;
+-    color: #F5F5F5;
++    background-color: rgb(var(--base-950));
++    color: rgb(var(--ink-100));
+     font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+     -webkit-font-smoothing: antialiased;
+     -moz-osx-font-smoothing: grayscale;
+     letter-spacing: -0.01em;
++    transition: background-color 0.15s ease, color 0.15s ease;
+   }
+ 
+   ::selection {
+     background: rgba(208, 0, 0, 0.3);
+-    color: #fff;
++    color: rgb(var(--selection-fg));
+   }
+ }
+ 
+ @layer components {
+   .panel {
+-    @apply bg-base-800/80 border border-base-500/40 rounded-xl;
++    @apply bg-base-800/80 border border-base-500/40 rounded-xl transition-colors duration-150;
+   }
+ 
+   .panel-2 {
+-    @apply bg-base-700/60 border border-base-500/30 rounded-lg;
++    @apply bg-base-700/60 border border-base-500/30 rounded-lg transition-colors duration-150;
+   }
+ 
+   .section-label {
+@@ -55,7 +132,7 @@
+ 
+   .scrollbar-thin {
+     scrollbar-width: thin;
+-    scrollbar-color: #333 transparent;
++    scrollbar-color: rgb(var(--base-300)) transparent;
+   }
+ 
+   .scrollbar-thin::-webkit-scrollbar {
+@@ -64,7 +141,7 @@
+   }
+ 
+   .scrollbar-thin::-webkit-scrollbar-thumb {
+-    background: #333;
++    background: rgb(var(--base-300));
+     border-radius: 3px;
+   }
+ 
+diff --git a/FRONTEND/src/pages/AIInvestigationPage.tsx b/FRONTEND/src/pages/AIInvestigationPage.tsx
+index a9dcf52..d2b932f 100644
+--- a/FRONTEND/src/pages/AIInvestigationPage.tsx
++++ b/FRONTEND/src/pages/AIInvestigationPage.tsx
+@@ -93,6 +93,26 @@ function formatRiskScore(value: unknown): string {
+   )}/100`;
+ }
+ 
++function formatFraction(value: unknown): string {
++  if (typeof value !== 'number' || !Number.isFinite(value)) {
++    return 'UNAVAILABLE';
++  }
++
++  return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
++}
++
++// Backend RiskCategory keys -> display labels, matching the taxonomy
++// used on the Reports page / backend riskEngine.ts. Kept local since
++// this is the only place on this page that needs the human-readable
++// label rather than the raw key.
++const CATEGORY_LABELS: Record<string, string> = {
++  technical: 'Technical Integrity',
++  identity: 'Identity Consistency',
++  urlDomain: 'URL / Domain Risk',
++  content: 'Content / Social Engineering',
++  infrastructure: 'Infrastructure Risk',
++};
++
+ export function AIInvestigationPage() {
+   const location = useLocation();
+   const { setLastViewed, availableEmails, getEmail } = useActiveCase();
+@@ -179,13 +199,13 @@ const headerEmailContext = activeEmailData
+         activeEmailData ? (
+           <Badge
+             variant={
+-              typeof activeEmailData.score === 'number' &&
+-              activeEmailData.score >= 60
++              typeof activeEmailData.risk?.score === 'number' &&
++              activeEmailData.risk.score >= 60
+                 ? 'danger'
+                 : 'neutral'
+             }
+           >
+-            {activeEmailData.classification || 'Unknown'}
++            {activeEmailData.risk?.classification || 'Unknown'}
+           </Badge>
+         ) : undefined
+       }
+@@ -227,27 +247,45 @@ const headerEmailContext = activeEmailData
+ }
+ 
+ function AIInvestigationDetail({
+-  emailData,
++  emailData,
+ }: {
+-  emailData: any;
++  emailData: any;
+ }) {
+-  const threatScore =
+-    typeof emailData.score === 'number'
+-      ? emailData.score
+-      : null;
+-
+-  const riskLevel = String(
+-    emailData.level ?? 'UNKNOWN'
+-  ).toUpperCase();
+-
+-  const classification =
+-    emailData.classification || 'Unknown';
+-
+-  const mlAssessment =
+-    emailData.mlAssessment ?? {};
+-
+-  const aiAssessment =
+-    emailData.aiAssessment ?? {};
++  // The stored EmailRecord nests the deterministic risk assessment
++  // under `risk` (RiskAssessment: score/level/classification/
++  // confidence/evidenceCoverage/categoryScores) — it is never a
++  // top-level `score`/`level`/`classification` on the record itself.
++  // Reading those top-level fields (as this page previously did) is
++  // exactly why this page showed UNAVAILABLE while the Reports page
++  // (which reads report.threatAssessment, sourced from the same
++  // `risk` object) showed real values.
++  const risk = emailData.risk ?? {};
++
++  const threatScore =
++    typeof risk.score === 'number'
++      ? risk.score
++      : null;
++
++  const riskLevel = String(
++    risk.level ?? 'UNKNOWN'
++  ).toUpperCase();
++
++  const classification =
++    risk.classification || 'Unknown';
++
++  const riskConfidence = risk.confidence;
++  const evidenceCoverage = risk.evidenceCoverage;
++  const categoryScores: Record<string, { score: number | null; status: string }> | null =
++    risk.categoryScores ?? null;
++  const riskStatus = normalizeAvailability(
++    threatScore !== null ? 'AVAILABLE' : risk.status ?? 'UNAVAILABLE'
++  );
++
++  const mlAssessment =
++    emailData.mlAssessment ?? {};
++
++  const aiAssessment =
++    emailData.aiAssessment ?? {};
+ 
+   const mlStatus = normalizeAvailability(
+     mlAssessment.status
+@@ -384,94 +422,184 @@ function AIInvestigationDetail({
+         </p>
+       </Card>
+ 
+-      <div className="grid grid-cols-12 gap-5">
+-        {/* ==================== ML ASSESSMENT ==================== */}
+-        <Card className="col-span-4 flex flex-col items-center justify-center py-8 min-h-[380px] relative overflow-hidden">
+-          <div className="absolute top-0 left-0 right-0 flex items-center justify-center gap-2 pt-4">
+-            <SectionLabel>
+-              ML Assessment
+-            </SectionLabel>
+-            <ProvenanceTag type="ml" />
+-          </div>
++      <div className="grid grid-cols-12 gap-5">
++        {/* ============ DETERMINISTIC THREAT ASSESSMENT ============ */}
++        <Card className="col-span-4 flex flex-col items-center justify-center py-8 min-h-[380px] relative overflow-hidden">
++          <div className="absolute top-0 left-0 right-0 flex items-center justify-center gap-2 pt-4">
++            <SectionLabel>
++              Deterministic Threat Assessment
++            </SectionLabel>
++            <ProvenanceTag type="deterministic" />
++          </div>
++
++          {riskStatus === 'Available' &&
++          threatScore !== null ? (
++            <ThreatRing
++              mode="result"
++              score={threatScore}
++              riskLevel={riskLevel}
++              threatType={classification}
++              size={260}
++            />
++          ) : (
++            <UnavailablePanel
++              status={riskStatus}
++              label="Threat assessment"
++            />
++          )}
++        </Card>
++
++        <div className="col-span-8 space-y-5">
++          {/* Deterministic risk engine output — score, level,
++              classification, confidence, coverage, and the five
++              category scores. This is the ONLY source for these
++              values; it is never derived from ML probability or the
++              AI content score (Part B requirement). */}
++          <Card className="p-5">
++            <div className="flex items-center justify-between mb-3">
++              <div className="flex items-center gap-2">
++                <SectionLabel>
++                  Risk Engine Breakdown
++                </SectionLabel>
++                <ProvenanceTag type="deterministic" />
++              </div>
++
++              <span
++                className={cn(
++                  'text-[10px] font-bold uppercase tracking-wider',
++                  statusColor(riskStatus)
++                )}
++              >
++                Status: {riskStatus}
++              </span>
++            </div>
++
++            {riskStatus === 'Available' ? (
++              <>
++                <div className="grid grid-cols-4 gap-3 mb-3">
++                  <PreviewField
++                    label="Overall Risk Score"
++                    value={formatRiskScore(threatScore)}
++                    mono
++                  />
++                  <PreviewField
++                    label="Risk Level"
++                    value={riskLevel}
++                  />
++                  <PreviewField
++                    label="Risk Confidence"
++                    value={formatFraction(riskConfidence)}
++                    mono
++                  />
++                  <PreviewField
++                    label="Evidence Coverage"
++                    value={formatFraction(evidenceCoverage)}
++                    mono
++                  />
++                </div>
++
++                {categoryScores && (
++                  <div className="grid grid-cols-5 gap-2">
++                    {Object.entries(categoryScores).map(
++                      ([category, result]) => (
++                        <div
++                          key={category}
++                          className="panel-2 p-2.5 text-center"
++                        >
++                          <div className="text-[8px] uppercase tracking-wider text-ink-500 mb-1 leading-tight">
++                            {CATEGORY_LABELS[category] ?? category}
++                          </div>
++                          <div className="text-[13px] font-bold text-ink-200">
++                            {result?.score ?? '—'}
++                          </div>
++                          <div className="text-[8px] text-ink-600 mt-0.5">
++                            {result?.status ?? 'UNAVAILABLE'}
++                          </div>
++                        </div>
++                      )
++                    )}
++                  </div>
++                )}
++              </>
++            ) : (
++              <div className="text-[12px] text-ink-500 italic">
++                Insufficient evidence to compute a deterministic
++                threat score for this email.
++              </div>
++            )}
++          </Card>
++
++          {/* ML model output — a distinct, separately-labeled signal.
++              Its classification/probability are the model's own and
++              are never substituted for the deterministic risk score
++              above (Part B requirement). */}
++          <Card className="p-5">
++            <div className="flex items-center justify-between mb-3">
++              <div className="flex items-center gap-2">
++                <SectionLabel>
++                  ML Assessment
++                </SectionLabel>
++                <ProvenanceTag type="ml" />
++              </div>
++
++              <span
++                className={cn(
++                  'text-[10px] font-bold uppercase tracking-wider',
++                  statusColor(mlStatus)
++                )}
++              >
++                Model Status: {mlStatus}
++              </span>
++            </div>
++
++            {mlStatus === 'Available' ? (
++              <div className="grid grid-cols-4 gap-3">
++                <PreviewField
++                  label="ML Classification"
++                  value={mlAssessment.classification || 'UNAVAILABLE'}
++                />
++
++                <PreviewField
++                  label="Model Name / Version"
++                  value={
++                    mlAssessment.model ||
++                    mlAssessment.modelVersion ||
++                    'UNAVAILABLE'
++                  }
++                />
++
++                <PreviewField
++                  label="ML Probability (model output)"
++                  value={mlProbabilityLabel}
++                  mono
++                  valueClassName={
++                    mlProbabilityLabel !==
++                    'UNAVAILABLE'
++                      ? 'text-accent-400'
++                      : 'text-ink-500'
++                  }
++                />
++
++                <PreviewField
++                  label="Model Status"
++                  value={mlStatus}
++                />
++              </div>
++            ) : (
++              <div className="text-[12px] text-ink-500 italic">
++                ML assessment{' '}
++                {mlStatus.toLowerCase()} for this
++                email.
++              </div>
++            )}
++
++            <p className="text-[10px] text-ink-600 mt-3 italic">
++              ML probability is a model output, not the final threat
++              score. The deterministic risk engine (above) is the
++              source of the overall risk score and classification.
++            </p>
++          </Card>
+ 
+-          {mlStatus === 'Available' &&
+-          threatScore !== null ? (
+-            <ThreatRing
+-              mode="result"
+-              score={threatScore}
+-              riskLevel={riskLevel}
+-              threatType={classification}
+-              size={260}
+-            />
+-          ) : (
+-            <UnavailablePanel
+-              status={mlStatus}
+-              label="ML"
+-            />
+-          )}
+-        </Card>
+-
+-        <div className="col-span-8 space-y-5">
+-          <Card className="p-5">
+-            <div className="flex items-center justify-between mb-3">
+-              <div className="flex items-center gap-2">
+-                <SectionLabel>
+-                  ML Assessment
+-                </SectionLabel>
+-                <ProvenanceTag type="ml" />
+-              </div>
+-
+-              <span
+-                className={cn(
+-                  'text-[10px] font-bold uppercase tracking-wider',
+-                  statusColor(mlStatus)
+-                )}
+-              >
+-                Model Status: {mlStatus}
+-              </span>
+-            </div>
+-
+-            {mlStatus === 'Available' ? (
+-              <div className="grid grid-cols-4 gap-3">
+-                <PreviewField
+-                  label="Classification"
+-                  value={classification}
+-                />
+-
+-                <PreviewField
+-                  label="Model Name / Version"
+-                  value={
+-                    mlAssessment.model ||
+-                    mlAssessment.modelVersion ||
+-                    'UNAVAILABLE'
+-                  }
+-                />
+-
+-                <PreviewField
+-                  label="ML Probability"
+-                  value={mlProbabilityLabel}
+-                  mono
+-                  valueClassName={
+-                    mlProbabilityLabel !==
+-                    'UNAVAILABLE'
+-                      ? 'text-accent-400'
+-                      : 'text-ink-500'
+-                  }
+-                />
+-
+-                <PreviewField
+-                  label="Model Status"
+-                  value={mlStatus}
+-                />
+-              </div>
+-            ) : (
+-              <div className="text-[12px] text-ink-500 italic">
+-                ML assessment{' '}
+-                {mlStatus.toLowerCase()} for this
+-                email.
+-              </div>
+-            )}
+-          </Card>
+ 
+           {/* ==================== AI INTERPRETATION ==================== */}
+           <Card className="p-5">
+diff --git a/FRONTEND/tailwind.config.js b/FRONTEND/tailwind.config.js
+index ce67ed1..68dbbb3 100644
+--- a/FRONTEND/tailwind.config.js
++++ b/FRONTEND/tailwind.config.js
+@@ -4,18 +4,24 @@ export default {
+   theme: {
+     extend: {
+       colors: {
++        // base/ink are CSS-variable-backed (see index.css :root / .light)
++        // so the SAME utility classes (bg-base-800, text-ink-500, etc.)
++        // resolve to dark-theme or light-theme values depending on the
++        // `.light` class on <html> — no component changes needed to
++        // support theming. accent stays a fixed restrained red in both
++        // themes (identity color, not surface/text).
+         base: {
+-          950: '#080808',
+-          900: '#0A0A0A',
+-          850: '#0D0D0D',
+-          800: '#111111',
+-          750: '#141414',
+-          700: '#151515',
+-          650: '#181818',
+-          600: '#1C1C1C',
+-          500: '#222222',
+-          400: '#2A2A2A',
+-          300: '#333333',
++          950: 'rgb(var(--base-950) / <alpha-value>)',
++          900: 'rgb(var(--base-900) / <alpha-value>)',
++          850: 'rgb(var(--base-850) / <alpha-value>)',
++          800: 'rgb(var(--base-800) / <alpha-value>)',
++          750: 'rgb(var(--base-750) / <alpha-value>)',
++          700: 'rgb(var(--base-700) / <alpha-value>)',
++          650: 'rgb(var(--base-650) / <alpha-value>)',
++          600: 'rgb(var(--base-600) / <alpha-value>)',
++          500: 'rgb(var(--base-500) / <alpha-value>)',
++          400: 'rgb(var(--base-400) / <alpha-value>)',
++          300: 'rgb(var(--base-300) / <alpha-value>)',
+         },
+         accent: {
+           50: '#FEF2F2',
+@@ -30,14 +36,14 @@ export default {
+           900: '#8B0808',
+         },
+         ink: {
+-          50: '#FAFAFA',
+-          100: '#F5F5F5',
+-          200: '#E5E5E5',
+-          300: '#D4D4D4',
+-          400: '#A3A3A3',
+-          500: '#737373',
+-          600: '#525252',
+-          700: '#404040',
++          50: 'rgb(var(--ink-50) / <alpha-value>)',
++          100: 'rgb(var(--ink-100) / <alpha-value>)',
++          200: 'rgb(var(--ink-200) / <alpha-value>)',
++          300: 'rgb(var(--ink-300) / <alpha-value>)',
++          400: 'rgb(var(--ink-400) / <alpha-value>)',
++          500: 'rgb(var(--ink-500) / <alpha-value>)',
++          600: 'rgb(var(--ink-600) / <alpha-value>)',
++          700: 'rgb(var(--ink-700) / <alpha-value>)',
+         },
+       },
+       fontFamily: {

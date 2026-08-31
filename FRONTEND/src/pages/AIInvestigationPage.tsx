@@ -95,6 +95,26 @@ function formatRiskScore(value: unknown): string {
   )}/100`;
 }
 
+function formatFraction(value: unknown): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 'UNAVAILABLE';
+  }
+
+  return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
+}
+
+// Backend RiskCategory keys -> display labels, matching the taxonomy
+// used on the Reports page / backend riskEngine.ts. Kept local since
+// this is the only place on this page that needs the human-readable
+// label rather than the raw key.
+const CATEGORY_LABELS: Record<string, string> = {
+  technical: 'Technical Integrity',
+  identity: 'Identity Consistency',
+  urlDomain: 'URL / Domain Risk',
+  content: 'Content / Social Engineering',
+  infrastructure: 'Infrastructure Risk',
+};
+
 export function AIInvestigationPage() {
   const location = useLocation();
   const { setLastViewed, availableEmails, getEmail } = useActiveCase();
@@ -181,13 +201,13 @@ const headerEmailContext = activeEmailData
         activeEmailData ? (
           <Badge
             variant={
-              typeof activeEmailData.score === 'number' &&
-              activeEmailData.score >= 60
+              typeof activeEmailData.risk?.score === 'number' &&
+              activeEmailData.risk.score >= 60
                 ? 'danger'
                 : 'neutral'
             }
           >
-            {activeEmailData.classification || 'Unknown'}
+            {activeEmailData.risk?.classification || 'Unknown'}
           </Badge>
         ) : undefined
       }
@@ -229,27 +249,45 @@ const headerEmailContext = activeEmailData
 }
 
 function AIInvestigationDetail({
-  emailData,
+  emailData,
 }: {
-  emailData: any;
+  emailData: any;
 }) {
-  const threatScore =
-    typeof emailData.score === 'number'
-      ? emailData.score
-      : null;
+  // The stored EmailRecord nests the deterministic risk assessment
+  // under `risk` (RiskAssessment: score/level/classification/
+  // confidence/evidenceCoverage/categoryScores) — it is never a
+  // top-level `score`/`level`/`classification` on the record itself.
+  // Reading those top-level fields (as this page previously did) is
+  // exactly why this page showed UNAVAILABLE while the Reports page
+  // (which reads report.threatAssessment, sourced from the same
+  // `risk` object) showed real values.
+  const risk = emailData.risk ?? {};
 
-  const riskLevel = String(
-    emailData.level ?? 'UNKNOWN'
-  ).toUpperCase();
+  const threatScore =
+    typeof risk.score === 'number'
+      ? risk.score
+      : null;
 
-  const classification =
-    emailData.classification || 'Unknown';
+  const riskLevel = String(
+    risk.level ?? 'UNKNOWN'
+  ).toUpperCase();
 
-  const mlAssessment =
-    emailData.mlAssessment ?? {};
+  const classification =
+    risk.classification || 'Unknown';
 
-  const aiAssessment =
-    emailData.aiAssessment ?? {};
+  const riskConfidence = risk.confidence;
+  const evidenceCoverage = risk.evidenceCoverage;
+  const categoryScores: Record<string, { score: number | null; status: string }> | null =
+    risk.categoryScores ?? null;
+  const riskStatus = normalizeAvailability(
+    threatScore !== null ? 'AVAILABLE' : risk.status ?? 'UNAVAILABLE'
+  );
+
+  const mlAssessment =
+    emailData.mlAssessment ?? {};
+
+  const aiAssessment =
+    emailData.aiAssessment ?? {};
 
   const mlStatus = normalizeAvailability(
     mlAssessment.status
@@ -386,94 +424,184 @@ function AIInvestigationDetail({
         </p>
       </Card>
 
-      <div className="grid grid-cols-12 gap-5">
-        {/* ==================== ML ASSESSMENT ==================== */}
-        <Card className="col-span-4 flex flex-col items-center justify-center py-8 min-h-[380px] relative overflow-hidden">
-          <div className="absolute top-0 left-0 right-0 flex items-center justify-center gap-2 pt-4">
-            <SectionLabel>
-              ML Assessment
-            </SectionLabel>
-            <ProvenanceTag type="ml" />
-          </div>
+      <div className="grid grid-cols-12 gap-5">
+        {/* ============ DETERMINISTIC THREAT ASSESSMENT ============ */}
+        <Card className="col-span-4 flex flex-col items-center justify-center py-8 min-h-[380px] relative overflow-hidden">
+          <div className="absolute top-0 left-0 right-0 flex items-center justify-center gap-2 pt-4">
+            <SectionLabel>
+              Deterministic Threat Assessment
+            </SectionLabel>
+            <ProvenanceTag type="deterministic" />
+          </div>
 
-          {mlStatus === 'Available' &&
-          threatScore !== null ? (
-            <ThreatRing
-              mode="result"
-              score={threatScore}
-              riskLevel={riskLevel}
-              threatType={classification}
-              size={260}
-            />
-          ) : (
-            <UnavailablePanel
-              status={mlStatus}
-              label="ML"
-            />
-          )}
-        </Card>
+          {riskStatus === 'Available' &&
+          threatScore !== null ? (
+            <ThreatRing
+              mode="result"
+              score={threatScore}
+              riskLevel={riskLevel}
+              threatType={classification}
+              size={260}
+            />
+          ) : (
+            <UnavailablePanel
+              status={riskStatus}
+              label="Threat assessment"
+            />
+          )}
+        </Card>
 
-        <div className="col-span-8 space-y-5">
-          <Card className="p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <SectionLabel>
-                  ML Assessment
-                </SectionLabel>
-                <ProvenanceTag type="ml" />
-              </div>
+        <div className="col-span-8 space-y-5">
+          {/* Deterministic risk engine output — score, level,
+              classification, confidence, coverage, and the five
+              category scores. This is the ONLY source for these
+              values; it is never derived from ML probability or the
+              AI content score (Part B requirement). */}
+          <Card className="p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <SectionLabel>
+                  Risk Engine Breakdown
+                </SectionLabel>
+                <ProvenanceTag type="deterministic" />
+              </div>
 
-              <span
-                className={cn(
-                  'text-[10px] font-bold uppercase tracking-wider',
-                  statusColor(mlStatus)
-                )}
-              >
-                Model Status: {mlStatus}
-              </span>
-            </div>
+              <span
+                className={cn(
+                  'text-[10px] font-bold uppercase tracking-wider',
+                  statusColor(riskStatus)
+                )}
+              >
+                Status: {riskStatus}
+              </span>
+            </div>
 
-            {mlStatus === 'Available' ? (
-              <div className="grid grid-cols-4 gap-3">
-                <PreviewField
-                  label="Classification"
-                  value={classification}
-                />
+            {riskStatus === 'Available' ? (
+              <>
+                <div className="grid grid-cols-4 gap-3 mb-3">
+                  <PreviewField
+                    label="Overall Risk Score"
+                    value={formatRiskScore(threatScore)}
+                    mono
+                  />
+                  <PreviewField
+                    label="Risk Level"
+                    value={riskLevel}
+                  />
+                  <PreviewField
+                    label="Risk Confidence"
+                    value={formatFraction(riskConfidence)}
+                    mono
+                  />
+                  <PreviewField
+                    label="Evidence Coverage"
+                    value={formatFraction(evidenceCoverage)}
+                    mono
+                  />
+                </div>
 
-                <PreviewField
-                  label="Model Name / Version"
-                  value={
-                    mlAssessment.model ||
-                    mlAssessment.modelVersion ||
-                    'UNAVAILABLE'
-                  }
-                />
+                {categoryScores && (
+                  <div className="grid grid-cols-5 gap-2">
+                    {Object.entries(categoryScores).map(
+                      ([category, result]) => (
+                        <div
+                          key={category}
+                          className="panel-2 p-2.5 text-center"
+                        >
+                          <div className="text-[8px] uppercase tracking-wider text-ink-500 mb-1 leading-tight">
+                            {CATEGORY_LABELS[category] ?? category}
+                          </div>
+                          <div className="text-[13px] font-bold text-ink-200">
+                            {result?.score ?? '—'}
+                          </div>
+                          <div className="text-[8px] text-ink-600 mt-0.5">
+                            {result?.status ?? 'UNAVAILABLE'}
+                          </div>
+                        </div>
+                      )
+                    )}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="text-[12px] text-ink-500 italic">
+                Insufficient evidence to compute a deterministic
+                threat score for this email.
+              </div>
+            )}
+          </Card>
 
-                <PreviewField
-                  label="ML Probability"
-                  value={mlProbabilityLabel}
-                  mono
-                  valueClassName={
-                    mlProbabilityLabel !==
-                    'UNAVAILABLE'
-                      ? 'text-accent-400'
-                      : 'text-ink-500'
-                  }
-                />
+          {/* ML model output — a distinct, separately-labeled signal.
+              Its classification/probability are the model's own and
+              are never substituted for the deterministic risk score
+              above (Part B requirement). */}
+          <Card className="p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <SectionLabel>
+                  ML Assessment
+                </SectionLabel>
+                <ProvenanceTag type="ml" />
+              </div>
 
-                <PreviewField
-                  label="Model Status"
-                  value={mlStatus}
-                />
-              </div>
-            ) : (
-              <div className="text-[12px] text-ink-500 italic">
-                ML assessment{' '}
-                {mlStatus.toLowerCase()} for this
-                email.
-              </div>
-            )}
-          </Card>
+              <span
+                className={cn(
+                  'text-[10px] font-bold uppercase tracking-wider',
+                  statusColor(mlStatus)
+                )}
+              >
+                Model Status: {mlStatus}
+              </span>
+            </div>
+
+            {mlStatus === 'Available' ? (
+              <div className="grid grid-cols-4 gap-3">
+                <PreviewField
+                  label="ML Classification"
+                  value={mlAssessment.classification || 'UNAVAILABLE'}
+                />
+
+                <PreviewField
+                  label="Model Name / Version"
+                  value={
+                    mlAssessment.model ||
+                    mlAssessment.modelVersion ||
+                    'UNAVAILABLE'
+                  }
+                />
+
+                <PreviewField
+                  label="ML Probability (model output)"
+                  value={mlProbabilityLabel}
+                  mono
+                  valueClassName={
+                    mlProbabilityLabel !==
+                    'UNAVAILABLE'
+                      ? 'text-accent-400'
+                      : 'text-ink-500'
+                  }
+                />
+
+                <PreviewField
+                  label="Model Status"
+                  value={mlStatus}
+                />
+              </div>
+            ) : (
+              <div className="text-[12px] text-ink-500 italic">
+                ML assessment{' '}
+                {mlStatus.toLowerCase()} for this
+                email.
+              </div>
+            )}
+
+            <p className="text-[10px] text-ink-600 mt-3 italic">
+              ML probability is a model output, not the final threat
+              score. The deterministic risk engine (above) is the
+              source of the overall risk score and classification.
+            </p>
+          </Card>
+
 
           {/* ==================== AI INTERPRETATION ==================== */}
           <Card className="p-5">

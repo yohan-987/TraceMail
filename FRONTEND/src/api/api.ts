@@ -46,16 +46,36 @@ export interface ApiEmailDetail {
     score?: number | null;
     level?: string | null;
     classification?: string | null;
+    /** Fraction 0-1 — corroboration across independent categories, not a calibrated probability. */
+    confidence?: number | null;
+    /** Fraction 0-1 — how many of the five risk categories were AVAILABLE. */
+    evidenceCoverage?: number | null;
+    categoryScores?: Record<
+      string,
+      { score: number | null; status: string; evidence?: Array<{ message: string }> }
+    > | null;
+    status?: string;
   } | null;
   mlAssessment?: {
+    model?: string | null;
+    modelVersion?: string | null;
+    classification?: string | null;
     probability?: number | null;
     status?: string;
   } | null;
   aiAssessment?: {
     summary?: string | null;
     attackType?: string | null;
+    phishingIntent?: number | null;
+    credentialHarvesting?: number | null;
+    financialFraud?: number | null;
+    impersonation?: number | null;
+    socialEngineering?: number | null;
+    aiContentScore?: number | null;
+    recommendedActions?: Array<string | { action?: string; reason?: string }>;
     status?: string;
   } | null;
+  iocs?: { ips?: string[]; domains?: string[]; urls?: string[]; hashes?: string[]; emails?: string[] } | null;
   explanations?: Array<{ message: string }>;
   recommendations?: ApiRecommendation[];
 }

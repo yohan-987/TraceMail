@@ -2,33 +2,110 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Theme variables. Values are space-separated RGB triplets so Tailwind's
+ * `rgb(var(--x) / <alpha-value>)` pattern (see tailwind.config.js) can
+ * still apply opacity modifiers like bg-base-800/80. Dark is the
+ * default (:root); .light on <html> overrides it. This is a value
+ * swap only — every bg-base and text-ink class already in the app
+ * keeps working unchanged in both themes.
+ */
+:root {
+  /* Dark (default) — near-black background, charcoal panels,
+     off-white primary text, muted gray secondary text. */
+  --base-950: 8 8 8;
+  --base-900: 10 10 10;
+  --base-850: 13 13 13;
+  --base-800: 17 17 17;
+  --base-750: 20 20 20;
+  --base-700: 21 21 21;
+  --base-650: 24 24 24;
+  --base-600: 28 28 28;
+  --base-500: 34 34 34;
+  --base-400: 42 42 42;
+  --base-300: 51 51 51;
+
+  --ink-50: 250 250 250;
+  --ink-100: 245 245 245;
+  --ink-200: 229 229 229;
+  --ink-300: 212 212 212;
+  --ink-400: 163 163 163;
+  --ink-500: 115 115 115;
+  --ink-600: 82 82 82;
+  --ink-700: 64 64 64;
+
+  --hairline: 255 255 255;
+  --hairline-alpha: 0.04;
+  --selection-fg: 255 255 255;
+}
+
+.light {
+  /* Light — neutral light background, white/light panels, dark text,
+     subtle borders, readable secondary text. Deliberately not a
+     straight invert of the dark palette (e.g. text isn't pure black,
+     panels aren't pure white-on-white with no separation). */
+  --base-950: 244 244 246;
+  --base-900: 248 248 249;
+  --base-850: 255 255 255;
+  --base-800: 255 255 255;
+  --base-750: 250 250 251;
+  --base-700: 246 246 247;
+  --base-650: 241 241 243;
+  --base-600: 235 235 238;
+  --base-500: 224 224 228;
+  --base-400: 211 211 216;
+  --base-300: 195 195 201;
+
+  --ink-50: 23 23 26;
+  --ink-100: 34 34 38;
+  --ink-200: 48 48 54;
+  --ink-300: 71 71 79;
+  --ink-400: 96 96 106;
+  --ink-500: 122 122 132;
+  --ink-600: 150 150 159;
+  --ink-700: 182 182 190;
+
+  --hairline: 0 0 0;
+  --hairline-alpha: 0.08;
+  --selection-fg: 255 255 255;
+}
+
 @layer base {
   * {
-    border-color: rgba(255, 255, 255, 0.04);
+    border-color: rgb(var(--hairline) / var(--hairline-alpha));
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  html.light {
+    color-scheme: light;
   }
 
   body {
-    background-color: #080808;
-    color: #F5F5F5;
+    background-color: rgb(var(--base-950));
+    color: rgb(var(--ink-100));
     font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     letter-spacing: -0.01em;
+    transition: background-color 0.15s ease, color 0.15s ease;
   }
 
   ::selection {
     background: rgba(208, 0, 0, 0.3);
-    color: #fff;
+    color: rgb(var(--selection-fg));
   }
 }
 
 @layer components {
   .panel {
-    @apply bg-base-800/80 border border-base-500/40 rounded-xl;
+    @apply bg-base-800/80 border border-base-500/40 rounded-xl transition-colors duration-150;
   }
 
   .panel-2 {
-    @apply bg-base-700/60 border border-base-500/30 rounded-lg;
+    @apply bg-base-700/60 border border-base-500/30 rounded-lg transition-colors duration-150;
   }
 
   .section-label {
@@ -55,7 +132,7 @@
 
   .scrollbar-thin {
     scrollbar-width: thin;
-    scrollbar-color: #333 transparent;
+    scrollbar-color: rgb(var(--base-300)) transparent;
   }
 
   .scrollbar-thin::-webkit-scrollbar {
@@ -64,11 +141,57 @@
   }
 
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    background: #333;
+    background: rgb(var(--base-300));
     border-radius: 3px;
   }
 
   .scrollbar-thin::-webkit-scrollbar-track {
     background: transparent;
   }
+}
+/*
+ * Leaflet overrides — themed to match the app's dark/light palette
+ * instead of Leaflet's default white popup/control chrome. Kept
+ * outside @layer so these plain-CSS-selector rules reliably beat
+ * Leaflet's own stylesheet regardless of import order.
+ */
+.leaflet-container {
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  background: rgb(var(--base-950));
+}
+
+.leaflet-popup-content-wrapper {
+  background: rgb(var(--base-800));
+  color: rgb(var(--ink-100));
+  border: 1px solid rgb(var(--base-500) / 0.4);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.leaflet-popup-tip {
+  background: rgb(var(--base-800));
+  border: 1px solid rgb(var(--base-500) / 0.4);
+}
+
+.leaflet-popup-close-button {
+  color: rgb(var(--ink-400)) !important;
+}
+
+.leaflet-control-zoom a {
+  background: rgb(var(--base-800)) !important;
+  color: rgb(var(--ink-200)) !important;
+  border-color: rgb(var(--base-500) / 0.4) !important;
+}
+
+.leaflet-control-zoom a:hover {
+  background: rgb(var(--base-700)) !important;
+}
+
+.leaflet-control-attribution {
+  background: rgb(var(--base-900) / 0.85) !important;
+  color: rgb(var(--ink-600)) !important;
+}
+
+.leaflet-control-attribution a {
+  color: rgb(var(--ink-400)) !important;
 }

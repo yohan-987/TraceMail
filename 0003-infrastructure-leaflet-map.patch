@@ -1,0 +1,501 @@
+diff --git a/FRONTEND/package.json b/FRONTEND/package.json
+index 843187d..30ed879 100644
+--- a/FRONTEND/package.json
++++ b/FRONTEND/package.json
+@@ -12,13 +12,16 @@
+   },
+   "dependencies": {
+     "@supabase/supabase-js": "^2.57.4",
++    "leaflet": "^1.9.4",
+     "lucide-react": "^0.446.0",
+     "react": "^18.3.1",
+     "react-dom": "^18.3.1",
++    "react-leaflet": "^4.2.1",
+     "react-router-dom": "^7.18.2"
+   },
+   "devDependencies": {
+     "@eslint/js": "^9.9.1",
++    "@types/leaflet": "^1.9.12",
+     "@types/react": "^18.3.5",
+     "@types/react-dom": "^18.3.0",
+     "@vitejs/plugin-react": "^4.3.1",
+diff --git a/FRONTEND/src/components/InfrastructureMap.tsx b/FRONTEND/src/components/InfrastructureMap.tsx
+new file mode 100644
+index 0000000..aa94a40
+--- /dev/null
++++ b/FRONTEND/src/components/InfrastructureMap.tsx
+@@ -0,0 +1,170 @@
++import { useEffect, useMemo, useRef } from 'react';
++import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
++import L from 'leaflet';
++import { MapPin, ShieldQuestion } from 'lucide-react';
++import type { InfraNode, MappedGeoEntry } from '@/types/infrastructure';
++import { geoValue } from '@/types/infrastructure';
++
++/**
++ * Interactive geolocation map for probable infrastructure (candidate
++ * source IPs), backed by Leaflet + OpenStreetMap tiles. Replaces the
++ * old approximate SVG plot.
++ *
++ * This ONLY plots points already validated upstream in
++ * InfrastructurePage.mapDetailedApiToInfrastructure — finite lat/lon,
++ * lat in [-90,90], lon in [-180,180]. It never fabricates or defaults
++ * a coordinate; a record without a valid latitude/longitude never
++ * reaches this component (see the `points` filtering in
++ * InfrastructurePage — candidateGeo only).
++ */
++
++const STATUS_COLOR: Record<string, string> = {
++  malicious: '#dc2626',
++  suspicious: '#f59e0b',
++  clean: '#10b981',
++  unknown: '#a3a3a3',
++};
++
++function markerIcon(color: string): L.DivIcon {
++  // A hand-rolled DivIcon (no external PNG asset) — avoids the classic
++  // Leaflet-under-a-bundler broken default-marker-icon-path problem
++  // entirely, and lets the marker color reflect the same
++  // malicious/suspicious/clean/unknown convention used everywhere
++  // else in the app (RelationshipGraph, statusColors, etc).
++  return L.divIcon({
++    className: '',
++    html: `
++      <div style="
++        width: 16px; height: 16px; border-radius: 50%;
++        background: ${color};
++        border: 2px solid rgba(255,255,255,0.85);
++        box-shadow: 0 0 0 4px ${color}33, 0 1px 4px rgba(0,0,0,0.5);
++      "></div>
++    `,
++    iconSize: [16, 16],
++    iconAnchor: [8, 8],
++    popupAnchor: [0, -8],
++  });
++}
++
++/** Fits the map to all valid points (or centers on the single point) whenever
++ *  the point set changes — never a hard-coded geographic center. */
++function FitToPoints({ points }: { points: Array<{ lat: number; lon: number }> }) {
++  const map = useMap();
++
++  useEffect(() => {
++    // Guards against Leaflet initializing into a zero-size container
++    // (e.g. if this tab wasn't visible yet on first mount).
++    map.invalidateSize();
++
++    if (points.length === 0) return;
++
++    if (points.length === 1) {
++      map.setView([points[0].lat, points[0].lon], 6);
++      return;
++    }
++
++    const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lon] as [number, number]));
++    map.fitBounds(bounds, { padding: [32, 32], maxZoom: 8 });
++  }, [map, points]);
++
++  return null;
++}
++
++export function InfrastructureMap({
++  points,
++  nodes,
++}: {
++  points: MappedGeoEntry[];
++  nodes: InfraNode[];
++}) {
++  // Re-validated defensively at render time too (not just at mapping
++  // time) so one malformed record can never crash the map — it's
++  // simply excluded, same as any other unresolved entry.
++  const validPoints = useMemo(
++    () =>
++      points.filter(
++        (p): p is MappedGeoEntry & { lat: number; lon: number } =>
++          typeof p.lat === 'number' &&
++          Number.isFinite(p.lat) &&
++          typeof p.lon === 'number' &&
++          Number.isFinite(p.lon)
++      ),
++    [points]
++  );
++
++  // Stable icon instances per status — avoids rebuilding a DivIcon on
++  // every render.
++  const icons = useRef<Record<string, L.DivIcon>>({});
++  for (const status of Object.keys(STATUS_COLOR)) {
++    if (!icons.current[status]) {
++      icons.current[status] = markerIcon(STATUS_COLOR[status]);
++    }
++  }
++
++  if (validPoints.length === 0) {
++    return (
++      <div className="h-64 flex flex-col items-center justify-center gap-2 rounded-lg border border-base-500/15 bg-base-950/40">
++        <ShieldQuestion className="w-5 h-5 text-ink-600" />
++        <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-600">
++          Location Unavailable
++        </span>
++        <span className="text-[10px] text-ink-700 max-w-[220px] text-center leading-relaxed">
++          No candidate IP for this email resolved to a valid coordinate.
++        </span>
++      </div>
++    );
++  }
++
++  return (
++    <div className="h-64 rounded-lg overflow-hidden border border-base-500/15 relative z-0">
++      <MapContainer
++        center={[validPoints[0].lat, validPoints[0].lon]}
++        zoom={4}
++        scrollWheelZoom
++        style={{ height: '100%', width: '100%', background: '#0a0a0a' }}
++      >
++        <TileLayer
++          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
++          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
++        />
++
++        <FitToPoints points={validPoints} />
++
++        {validPoints.map((geo) => {
++          const match = nodes.find((n) => n.type === 'ip' && n.label === geo.ip);
++          const status = match?.status ?? 'unknown';
++          return (
++            <Marker key={geo.ip} position={[geo.lat, geo.lon]} icon={icons.current[status]}>
++              <Popup>
++                <div style={{ fontFamily: 'inherit', fontSize: '12px', lineHeight: 1.5, minWidth: 180 }}>
++                  <div style={{ fontWeight: 700, marginBottom: 4 }}>{geo.ip}</div>
++                  <PopupRow label="Country" value={geoValue(geo.country)} />
++                  <PopupRow label="Region" value={geoValue(geo.region)} />
++                  <PopupRow label="City" value={geoValue(geo.city)} />
++                  <PopupRow label="Latitude" value={geo.lat.toFixed(4)} />
++                  <PopupRow label="Longitude" value={geo.lon.toFixed(4)} />
++                  <PopupRow label="ISP" value={geoValue(geo.isp)} />
++                  <PopupRow label="ASN" value={geoValue(geo.asn)} />
++                  <PopupRow label="Org / Hosting" value={geoValue(geo.hosting || geo.organization)} />
++                  <div style={{ marginTop: 6, fontSize: 10, color: '#888', display: 'flex', alignItems: 'center', gap: 4 }}>
++                    <MapPin size={10} /> Probable infrastructure — not attacker identity
++                  </div>
++                </div>
++              </Popup>
++            </Marker>
++          );
++        })}
++      </MapContainer>
++    </div>
++  );
++}
++
++function PopupRow({ label, value }: { label: string; value: string }) {
++  return (
++    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
++      <span style={{ color: '#888' }}>{label}</span>
++      <span style={{ fontWeight: 500 }}>{value}</span>
++    </div>
++  );
++}
+diff --git a/FRONTEND/src/index.css b/FRONTEND/src/index.css
+index 2323b39..a6dbf87 100644
+--- a/FRONTEND/src/index.css
++++ b/FRONTEND/src/index.css
+@@ -148,4 +148,50 @@
+   .scrollbar-thin::-webkit-scrollbar-track {
+     background: transparent;
+   }
+-}
+\ No newline at end of file
++}
++/*
++ * Leaflet overrides — themed to match the app's dark/light palette
++ * instead of Leaflet's default white popup/control chrome. Kept
++ * outside @layer so these plain-CSS-selector rules reliably beat
++ * Leaflet's own stylesheet regardless of import order.
++ */
++.leaflet-container {
++  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
++  background: rgb(var(--base-950));
++}
++
++.leaflet-popup-content-wrapper {
++  background: rgb(var(--base-800));
++  color: rgb(var(--ink-100));
++  border: 1px solid rgb(var(--base-500) / 0.4);
++  border-radius: 10px;
++  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
++}
++
++.leaflet-popup-tip {
++  background: rgb(var(--base-800));
++  border: 1px solid rgb(var(--base-500) / 0.4);
++}
++
++.leaflet-popup-close-button {
++  color: rgb(var(--ink-400)) !important;
++}
++
++.leaflet-control-zoom a {
++  background: rgb(var(--base-800)) !important;
++  color: rgb(var(--ink-200)) !important;
++  border-color: rgb(var(--base-500) / 0.4) !important;
++}
++
++.leaflet-control-zoom a:hover {
++  background: rgb(var(--base-700)) !important;
++}
++
++.leaflet-control-attribution {
++  background: rgb(var(--base-900) / 0.85) !important;
++  color: rgb(var(--ink-600)) !important;
++}
++
++.leaflet-control-attribution a {
++  color: rgb(var(--ink-400)) !important;
++}
+diff --git a/FRONTEND/src/main.tsx b/FRONTEND/src/main.tsx
+index e0bbe63..16d6741 100644
+--- a/FRONTEND/src/main.tsx
++++ b/FRONTEND/src/main.tsx
+@@ -1,6 +1,7 @@
+ import { StrictMode } from 'react';
+ import { createRoot } from 'react-dom/client';
+ import App from './App.tsx';
++import 'leaflet/dist/leaflet.css';
+ import './index.css';
+ 
+ createRoot(document.getElementById('root')!).render(
+diff --git a/FRONTEND/src/pages/InfrastructurePage.tsx b/FRONTEND/src/pages/InfrastructurePage.tsx
+index ce53e9e..ca16877 100644
+--- a/FRONTEND/src/pages/InfrastructurePage.tsx
++++ b/FRONTEND/src/pages/InfrastructurePage.tsx
+@@ -7,36 +7,8 @@ import { InvestigationShell } from '@/components/InvestigationShell';
+ import { InvestigationWorkspace, PreviewField, PreviewInvestigateButton } from '@/components/InvestigationWorkspace';
+ import { cn } from '@/lib/utils';
+ import { getEmail as fetchEmailDetails, getRelatedEmails, type ApiRelatedEmails } from '@/api/api';
+-
+-// --- TYPES ---
+-export interface InfraNode {
+-  id: string;
+-  type: 'ip' | 'domain' | 'server' | 'sender';
+-  label: string;
+-  status: 'malicious' | 'suspicious' | 'clean' | 'unknown';
+-  x: number;
+-  y: number;
+-}
+-
+-export interface InfraEdge {
+-  from: string;
+-  to: string;
+-  label: string;
+-}
+-
+-export interface MappedGeoEntry {
+-  ip: string;
+-  country: string;
+-  region?: string;
+-  city: string;
+-  lat: number;
+-  lon: number;
+-  flag: string;
+-  isp: string;
+-  asn: string;
+-  organization?: string;
+-  hosting?: string;
+-}
++import { InfrastructureMap } from '@/components/InfrastructureMap';
++import { type InfraNode, type InfraEdge, type MappedGeoEntry, geoValue } from '@/types/infrastructure';
+ 
+ const nodeIcons: Record<string, typeof Server> = {
+   ip: Server,
+@@ -52,11 +24,6 @@ const statusColors: Record<string, string> = {
+   unknown: 'text-ink-400 border-base-500/30 bg-base-800/50',
+ };
+ 
+-function geoValue(raw: string | undefined | null): string {
+-  if (!raw || raw.toLowerCase() === 'unknown') return 'INCONCLUSIVE';
+-  return raw;
+-}
+-
+ function intelStatus(geo: MappedGeoEntry, nodes: InfraNode[]): string | null {
+   const match = nodes.find((n) => n.type === 'ip' && n.label === geo.ip);
+   if (!match) return null;
+@@ -75,6 +42,19 @@ function intelColor(label: string | null): string {
+   return 'text-ink-500';
+ }
+ 
++function isValidCoordinate(lat: unknown, lon: unknown): lat is number {
++  return (
++    typeof lat === 'number' &&
++    Number.isFinite(lat) &&
++    lat >= -90 &&
++    lat <= 90 &&
++    typeof lon === 'number' &&
++    Number.isFinite(lon) &&
++    lon >= -180 &&
++    lon <= 180
++  );
++}
++
+ function mapDetailedApiToInfrastructure(apiData: any) {
+   const geoData: MappedGeoEntry[] = [];
+   const infraNodes: InfraNode[] = [];
+@@ -93,15 +73,25 @@ function mapDetailedApiToInfrastructure(apiData: any) {
+     y: 20
+   });
+ 
+-  // Map IP Intelligence into GeoData and Graph Nodes without fabricating speculative edges
++  // Map IP Intelligence into GeoData and Graph Nodes without fabricating speculative edges.
++  // Coordinates: the backend record uses `latitude`/`longitude` (see GeoIpRecord /
++  // InfrastructureAssessment.ipIntelligence[] in schemas/types.ts) — NOT `lat`/`lon`.
++  // Reading `.lat`/`.lon` (as this previously did) always reads undefined and
++  // silently defaults to (0, 0) via `|| 0`, which the map then filters out as
++  // "unresolved" — that's why real coordinate data never rendered a marker,
++  // even once the backend supplied a valid latitude/longitude. Every candidate
++  // is validated (finite, in-range) before being treated as resolvable; an
++  // invalid/missing coordinate is stored as `null`, never coerced to 0.
+   ipIntel.forEach((ipObj: any, index: number) => {
++    const hasCoords = isValidCoordinate(ipObj?.latitude, ipObj?.longitude);
++
+     geoData.push({
+       ip: ipObj.ip,
+       country: ipObj.country || 'Unknown',
+       region: ipObj.region || 'Unknown',
+       city: ipObj.city || 'Unknown',
+-      lat: ipObj.lat || 0,
+-      lon: ipObj.lon || 0,
++      lat: hasCoords ? ipObj.latitude : null,
++      lon: hasCoords ? ipObj.longitude : null,
+       flag: ipObj.country?.substring(0, 2)?.toUpperCase() || '??',
+       isp: ipObj.isp || 'Unknown',
+       asn: ipObj.asn || 'Unknown',
+@@ -192,8 +182,8 @@ export function InfrastructurePage() {
+ 
+   const { geoData, infraNodes, infraEdges } = mappedInfra;
+   
+-  const candidateGeo = geoData.filter((g) => !(g.lat === 0 && g.lon === 0));
+-  const unresolvedGeo = geoData.filter((g) => g.lat === 0 && g.lon === 0);
++  const candidateGeo = geoData.filter((g) => g.lat !== null && g.lon !== null);
++  const unresolvedGeo = geoData.filter((g) => g.lat === null || g.lon === null);
+ 
+   // Use the real, already-fetched lightweight record from availableEmails —
+   // never a fabricated stub — so InvestigationShell/CaseSelector always
+@@ -259,21 +249,23 @@ export function InfrastructurePage() {
+               <div className="flex items-center justify-between mb-4">
+                 <div className="flex items-center gap-2">
+                   <MapPin className="w-3.5 h-3.5 text-accent-500" />
+-                  <SectionLabel>Geolocation Map</SectionLabel>
++                  <SectionLabel>Probable Infrastructure Map</SectionLabel>
+                 </div>
++                <span className="text-[9px] font-semibold uppercase tracking-wider text-sky-400 flex items-center gap-1">
++                  <Radar className="w-2.5 h-2.5" /> External Intel
++                </span>
+               </div>
+-              {candidateGeo.length > 0 ? (
+-                <GeoMap points={candidateGeo} nodes={infraNodes} />
+-              ) : (
+-                <div className="h-48 flex items-center justify-center text-[12px] text-ink-600">
+-                  No resolvable coordinates for this email
+-                </div>
+-              )}
++              <InfrastructureMap points={candidateGeo} nodes={infraNodes} />
+               <p className="text-[9px] text-ink-700 mt-2 italic">
+-                Approximate coordinate plot — not a precise basemap.
++                Map tiles &copy;{' '}
++                <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer" className="underline hover:text-ink-500">
++                  OpenStreetMap
++                </a>{' '}
++                contributors. Marker positions reflect GeoIP-resolved network infrastructure, not attacker identity.
+                 {unresolvedGeo.length > 0 && ` ${unresolvedGeo.length} candidate IP(s) excluded — no resolvable coordinates.`}
+               </p>
+             </Card>
++
+           </div>
+ 
+           <Card className="mt-5 p-5">
+@@ -385,42 +377,6 @@ function MiniField({ label, value, provenance }: { label: string; value: string
+   );
+ }
+ 
+-function GeoMap({ points, nodes }: { points: MappedGeoEntry[]; nodes: InfraNode[] }) {
+-  const toX = (lon: number) => ((lon + 180) / 360) * 360;
+-  const toY = (lat: number) => ((90 - lat) / 180) * 180;
+-
+-  return (
+-    <div className="relative w-full h-48 bg-base-950/40 rounded-lg border border-base-500/15 overflow-hidden">
+-      <svg className="absolute inset-0 w-full h-full" viewBox="0 0 360 180" preserveAspectRatio="xMidYMid meet">
+-        <line x1="0" y1="90" x2="360" y2="90" stroke="rgba(115,115,115,0.15)" strokeWidth="0.5" />
+-        <line x1="180" y1="0" x2="180" y2="180" stroke="rgba(115,115,115,0.15)" strokeWidth="0.5" />
+-        {Array.from({ length: 7 }, (_, i) => (i + 1) * 45).map((x) => (
+-          <line key={`v${x}`} x1={x} y1="0" x2={x} y2="180" stroke="rgba(115,115,115,0.06)" strokeWidth="0.5" />
+-        ))}
+-        {Array.from({ length: 3 }, (_, i) => (i + 1) * 45).map((y) => (
+-          <line key={`h${y}`} x1="0" y1={y} x2="360" y2={y} stroke="rgba(115,115,115,0.06)" strokeWidth="0.5" />
+-        ))}
+-
+-        {points.map((geo) => {
+-          const match = nodes.find((n) => n.type === 'ip' && n.label === geo.ip);
+-          const color = match?.status === 'malicious' ? '#dc2626' : match?.status === 'suspicious' ? '#f59e0b' : match?.status === 'clean' ? '#10b981' : '#737373';
+-          const cx = toX(geo.lon);
+-          const cy = toY(geo.lat);
+-          return (
+-            <g key={geo.ip}>
+-              <circle cx={cx} cy={cy} r="4" fill={color} opacity="0.25" />
+-              <circle cx={cx} cy={cy} r="2" fill={color} />
+-              <text x={cx} y={cy - 5} fill="rgba(229,229,229,0.65)" fontSize="5" textAnchor="middle" className="mono">
+-                {geo.flag}
+-              </text>
+-            </g>
+-          );
+-        })}
+-      </svg>
+-    </div>
+-  );
+-}
+-
+ function RelationshipGraph({ nodes, edges }: { nodes: InfraNode[]; edges: InfraEdge[] }) {
+   return (
+     <div className="relative w-full h-80 bg-base-950/40 rounded-lg border border-base-500/15 overflow-hidden">
+diff --git a/FRONTEND/src/types/infrastructure.ts b/FRONTEND/src/types/infrastructure.ts
+new file mode 100644
+index 0000000..67829a3
+--- /dev/null
++++ b/FRONTEND/src/types/infrastructure.ts
+@@ -0,0 +1,38 @@
++// Shared between InfrastructurePage.tsx and InfrastructureMap.tsx so
++// neither has to import the other (avoids a page <-> component
++// circular import).
++
++export interface InfraNode {
++  id: string;
++  type: 'ip' | 'domain' | 'server' | 'sender';
++  label: string;
++  status: 'malicious' | 'suspicious' | 'clean' | 'unknown';
++  x: number;
++  y: number;
++}
++
++export interface InfraEdge {
++  from: string;
++  to: string;
++  label: string;
++}
++
++export interface MappedGeoEntry {
++  ip: string;
++  country: string;
++  region?: string;
++  city: string;
++  /** null = no resolvable coordinate for this record — never defaulted to 0. */
++  lat: number | null;
++  lon: number | null;
++  flag: string;
++  isp: string;
++  asn: string;
++  organization?: string;
++  hosting?: string;
++}
++
++export function geoValue(raw: string | undefined | null): string {
++  if (!raw || raw.toLowerCase() === 'unknown') return 'INCONCLUSIVE';
++  return raw;
++}

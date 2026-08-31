@@ -7,36 +7,8 @@ import { InvestigationShell } from '@/components/InvestigationShell';
 import { InvestigationWorkspace, PreviewField, PreviewInvestigateButton } from '@/components/InvestigationWorkspace';
 import { cn } from '@/lib/utils';
 import { getEmail as fetchEmailDetails, getRelatedEmails, type ApiRelatedEmails } from '@/api/api';
-
-// --- TYPES ---
-export interface InfraNode {
-  id: string;
-  type: 'ip' | 'domain' | 'server' | 'sender';
-  label: string;
-  status: 'malicious' | 'suspicious' | 'clean' | 'unknown';
-  x: number;
-  y: number;
-}
-
-export interface InfraEdge {
-  from: string;
-  to: string;
-  label: string;
-}
-
-export interface MappedGeoEntry {
-  ip: string;
-  country: string;
-  region?: string;
-  city: string;
-  lat: number;
-  lon: number;
-  flag: string;
-  isp: string;
-  asn: string;
-  organization?: string;
-  hosting?: string;
-}
+import { InfrastructureMap } from '@/components/InfrastructureMap';
+import { type InfraNode, type InfraEdge, type MappedGeoEntry, geoValue } from '@/types/infrastructure';
 
 const nodeIcons: Record<string, typeof Server> = {
   ip: Server,
@@ -51,11 +23,6 @@ const statusColors: Record<string, string> = {
   clean: 'text-emerald-500 border-emerald-700/20 bg-emerald-700/10',
   unknown: 'text-ink-400 border-base-500/30 bg-base-800/50',
 };
-
-function geoValue(raw: string | undefined | null): string {
-  if (!raw || raw.toLowerCase() === 'unknown') return 'INCONCLUSIVE';
-  return raw;
-}
 
 function intelStatus(geo: MappedGeoEntry, nodes: InfraNode[]): string | null {
   const match = nodes.find((n) => n.type === 'ip' && n.label === geo.ip);
@@ -73,6 +40,19 @@ function intelColor(label: string | null): string {
   if (label === 'Suspicious') return 'text-amber-400';
   if (label === 'Verified') return 'text-emerald-400';
   return 'text-ink-500';
+}
+
+function isValidCoordinate(lat: unknown, lon: unknown): lat is number {
+  return (
+    typeof lat === 'number' &&
+    Number.isFinite(lat) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    typeof lon === 'number' &&
+    Number.isFinite(lon) &&
+    lon >= -180 &&
+    lon <= 180
+  );
 }
 
 function mapDetailedApiToInfrastructure(apiData: any) {
@@ -93,15 +73,25 @@ function mapDetailedApiToInfrastructure(apiData: any) {
     y: 20
   });
 
-  // Map IP Intelligence into GeoData and Graph Nodes without fabricating speculative edges
+  // Map IP Intelligence into GeoData and Graph Nodes without fabricating speculative edges.
+  // Coordinates: the backend record uses `latitude`/`longitude` (see GeoIpRecord /
+  // InfrastructureAssessment.ipIntelligence[] in schemas/types.ts) — NOT `lat`/`lon`.
+  // Reading `.lat`/`.lon` (as this previously did) always reads undefined and
+  // silently defaults to (0, 0) via `|| 0`, which the map then filters out as
+  // "unresolved" — that's why real coordinate data never rendered a marker,
+  // even once the backend supplied a valid latitude/longitude. Every candidate
+  // is validated (finite, in-range) before being treated as resolvable; an
+  // invalid/missing coordinate is stored as `null`, never coerced to 0.
   ipIntel.forEach((ipObj: any, index: number) => {
+    const hasCoords = isValidCoordinate(ipObj?.latitude, ipObj?.longitude);
+
     geoData.push({
       ip: ipObj.ip,
       country: ipObj.country || 'Unknown',
       region: ipObj.region || 'Unknown',
       city: ipObj.city || 'Unknown',
-      lat: ipObj.latitude ?? 0,
-      lon: ipObj.longitude ?? 0,
+      lat: hasCoords ? ipObj.latitude : null,
+      lon: hasCoords ? ipObj.longitude : null,
       flag: ipObj.country?.substring(0, 2)?.toUpperCase() || '??',
       isp: ipObj.isp || 'Unknown',
       asn: ipObj.asn || 'Unknown',
@@ -192,8 +182,8 @@ export function InfrastructurePage() {
 
   const { geoData, infraNodes, infraEdges } = mappedInfra;
   
-  const candidateGeo = geoData.filter((g) => !(g.lat === 0 && g.lon === 0));
-  const unresolvedGeo = geoData.filter((g) => g.lat === 0 && g.lon === 0);
+  const candidateGeo = geoData.filter((g) => g.lat !== null && g.lon !== null);
+  const unresolvedGeo = geoData.filter((g) => g.lat === null || g.lon === null);
 
   // Use the real, already-fetched lightweight record from availableEmails —
   // never a fabricated stub — so InvestigationShell/CaseSelector always
@@ -259,21 +249,23 @@ export function InfrastructurePage() {
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
                   <MapPin className="w-3.5 h-3.5 text-accent-500" />
-                  <SectionLabel>Geolocation Map</SectionLabel>
+                  <SectionLabel>Probable Infrastructure Map</SectionLabel>
                 </div>
+                <span className="text-[9px] font-semibold uppercase tracking-wider text-sky-400 flex items-center gap-1">
+                  <Radar className="w-2.5 h-2.5" /> External Intel
+                </span>
               </div>
-              {candidateGeo.length > 0 ? (
-                <GeoMap points={candidateGeo} nodes={infraNodes} />
-              ) : (
-                <div className="h-48 flex items-center justify-center text-[12px] text-ink-600">
-                  No resolvable coordinates for this email
-                </div>
-              )}
+              <InfrastructureMap points={candidateGeo} nodes={infraNodes} />
               <p className="text-[9px] text-ink-700 mt-2 italic">
-                Approximate coordinate plot — not a precise basemap.
+                Map tiles &copy;{' '}
+                <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer" className="underline hover:text-ink-500">
+                  OpenStreetMap
+                </a>{' '}
+                contributors. Marker positions reflect GeoIP-resolved network infrastructure, not attacker identity.
                 {unresolvedGeo.length > 0 && ` ${unresolvedGeo.length} candidate IP(s) excluded — no resolvable coordinates.`}
               </p>
             </Card>
+
           </div>
 
           <Card className="mt-5 p-5">
@@ -381,42 +373,6 @@ function MiniField({ label, value, provenance }: { label: string; value: string 
       ) : (
         <span className="mono text-[11px] text-ink-300 truncate">{value}</span>
       )}
-    </div>
-  );
-}
-
-function GeoMap({ points, nodes }: { points: MappedGeoEntry[]; nodes: InfraNode[] }) {
-  const toX = (lon: number) => ((lon + 180) / 360) * 360;
-  const toY = (lat: number) => ((90 - lat) / 180) * 180;
-
-  return (
-    <div className="relative w-full h-48 bg-base-950/40 rounded-lg border border-base-500/15 overflow-hidden">
-      <svg className="absolute inset-0 w-full h-full" viewBox="0 0 360 180" preserveAspectRatio="xMidYMid meet">
-        <line x1="0" y1="90" x2="360" y2="90" stroke="rgba(115,115,115,0.15)" strokeWidth="0.5" />
-        <line x1="180" y1="0" x2="180" y2="180" stroke="rgba(115,115,115,0.15)" strokeWidth="0.5" />
-        {Array.from({ length: 7 }, (_, i) => (i + 1) * 45).map((x) => (
-          <line key={`v${x}`} x1={x} y1="0" x2={x} y2="180" stroke="rgba(115,115,115,0.06)" strokeWidth="0.5" />
-        ))}
-        {Array.from({ length: 3 }, (_, i) => (i + 1) * 45).map((y) => (
-          <line key={`h${y}`} x1="0" y1={y} x2="360" y2={y} stroke="rgba(115,115,115,0.06)" strokeWidth="0.5" />
-        ))}
-
-        {points.map((geo) => {
-          const match = nodes.find((n) => n.type === 'ip' && n.label === geo.ip);
-          const color = match?.status === 'malicious' ? '#dc2626' : match?.status === 'suspicious' ? '#f59e0b' : match?.status === 'clean' ? '#10b981' : '#737373';
-          const cx = toX(geo.lon);
-          const cy = toY(geo.lat);
-          return (
-            <g key={geo.ip}>
-              <circle cx={cx} cy={cy} r="4" fill={color} opacity="0.25" />
-              <circle cx={cx} cy={cy} r="2" fill={color} />
-              <text x={cx} y={cy - 5} fill="rgba(229,229,229,0.65)" fontSize="5" textAnchor="middle" className="mono">
-                {geo.flag}
-              </text>
-            </g>
-          );
-        })}
-      </svg>
     </div>
   );
 }

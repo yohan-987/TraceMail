@@ -229,7 +229,7 @@ function PreviewField({
   );
 }
 
-export function AuthChip({ label, status }: { label: string; status: 'pass' | 'fail' | 'none' }) {
+export function AuthChip({ label, status }: { label: string; status: string }) {
   const isFail = status !== 'pass';
   return (
     <div
