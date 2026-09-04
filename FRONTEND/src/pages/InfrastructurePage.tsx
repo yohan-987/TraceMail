@@ -1,12 +1,21 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
+import cytoscape from 'cytoscape';
 import { Network, MapPin, Server, Globe, Link2, Zap, Eye, Sparkles, Radar, AlertTriangle, ShieldQuestion } from 'lucide-react';
 import { Card, SectionLabel, Badge, Divider } from '@/components/ui/Primitives';
 import { useActiveCase } from '@/context/ActiveCaseContext';
 import { InvestigationShell } from '@/components/InvestigationShell';
 import { InvestigationWorkspace, PreviewField, PreviewInvestigateButton } from '@/components/InvestigationWorkspace';
 import { cn } from '@/lib/utils';
-import { getEmail as fetchEmailDetails, getRelatedEmails, type ApiRelatedEmails } from '@/api/api';
+import {
+  getEmail as fetchEmailDetails,
+  getRelatedEmails,
+  getEmailGraph,
+  type ApiRelatedEmails,
+  type ApiInfrastructureGraph,
+  type ApiInfrastructureGraphNode,
+  type ApiInfrastructureGraphNodeType,
+} from '@/api/api';
 import { InfrastructureMap } from '@/components/InfrastructureMap';
 import { type InfraNode, type InfraEdge, type MappedGeoEntry, geoValue } from '@/types/infrastructure';
 
@@ -23,6 +32,38 @@ const statusColors: Record<string, string> = {
   clean: 'text-emerald-500 border-emerald-700/20 bg-emerald-700/10',
   unknown: 'text-ink-400 border-base-500/30 bg-base-800/50',
 };
+
+// Relationship-graph node styling by type. Reuses this codebase's existing
+// palette (the ink/sky/amber/violet/cyan/emerald tones already used in
+// ProvenanceTag.tsx and this file's own statusColors/LegendItem) — no new
+// arbitrary colors. `status` on every InfrastructureGraphNode is always
+// "AVAILABLE" (see backend analyzers/infrastructureGraph.ts), so it carries
+// no risk signal to color by; coloring by node TYPE is the only meaningful
+// axis here. Where two related types share a hue (IP/ASN, ORGANIZATION/
+// GEOLOCATION), the shape differs so they stay visually distinct — and
+// deliberately never accent/red, since a node's category is not itself a
+// threat signal (see this page's own "location ≠ attacker identity" note).
+const graphNodeStyle: Record<ApiInfrastructureGraphNodeType, { color: string; shape: string }> = {
+  EMAIL: { color: '#e5e5e5', shape: 'ellipse' },
+  EMAIL_ADDRESS: { color: '#0ea5e9', shape: 'ellipse' },
+  DOMAIN: { color: '#f59e0b', shape: 'round-rectangle' },
+  URL: { color: '#8b5cf6', shape: 'round-rectangle' },
+  IP: { color: '#06b6d4', shape: 'diamond' },
+  ASN: { color: '#06b6d4', shape: 'hexagon' },
+  ORGANIZATION: { color: '#10b981', shape: 'rectangle' },
+  GEOLOCATION: { color: '#10b981', shape: 'star' },
+};
+
+const graphLegend: { type: ApiInfrastructureGraphNodeType; label: string; swatch: string }[] = [
+  { type: 'EMAIL', label: 'Email', swatch: 'bg-ink-200' },
+  { type: 'EMAIL_ADDRESS', label: 'Email Address', swatch: 'bg-sky-500' },
+  { type: 'DOMAIN', label: 'Domain', swatch: 'bg-amber-500' },
+  { type: 'URL', label: 'URL', swatch: 'bg-violet-500' },
+  { type: 'IP', label: 'IP', swatch: 'bg-cyan-500' },
+  { type: 'ASN', label: 'ASN', swatch: 'bg-cyan-500' },
+  { type: 'ORGANIZATION', label: 'Organization', swatch: 'bg-emerald-500' },
+  { type: 'GEOLOCATION', label: 'Geolocation', swatch: 'bg-emerald-500' },
+];
 
 function intelStatus(geo: MappedGeoEntry, nodes: InfraNode[]): string | null {
   const match = nodes.find((n) => n.type === 'ip' && n.label === geo.ip);
@@ -131,12 +172,17 @@ export function InfrastructurePage() {
   // the detail record so a failure here never blocks the rest of the
   // infrastructure view.
   const [relatedEmails, setRelatedEmails] = useState<ApiRelatedEmails | null>(null);
+  // Frontend F2 — real Cytoscape-ready relationship graph, fetched the
+  // same way: independently of the detail record, so one dead call never
+  // blocks the map or the rest of this page.
+  const [emailGraph, setEmailGraph] = useState<ApiInfrastructureGraph | null>(null);
 
   useEffect(() => {
     if (!infrastructureSelectedEmailId) {
       setActiveEmailData(null);
       setMappedInfra({ geoData: [], infraNodes: [], infraEdges: [] });
       setRelatedEmails(null);
+      setEmailGraph(null);
       return;
     }
 
@@ -168,6 +214,14 @@ export function InfrastructurePage() {
       })
       .catch(() => {
         if (!cancelled) setRelatedEmails(null);
+      });
+
+    getEmailGraph(infrastructureSelectedEmailId)
+      .then((data) => {
+        if (!cancelled) setEmailGraph(data);
+      })
+      .catch(() => {
+        if (!cancelled) setEmailGraph(null);
       });
 
     return () => {
@@ -267,6 +321,38 @@ export function InfrastructurePage() {
             </Card>
 
           </div>
+
+          {/* Frontend F2 — real Cytoscape-backed relationship graph from
+              GET /emails/:emailId/graph. Additive: the existing
+              "Infrastructure Relationships" placeholder card above (fed by
+              mapDetailedApiToInfrastructure, edges always []) and the GeoIP
+              map are both untouched. */}
+          <Card className="mt-5 p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Network className="w-3.5 h-3.5 text-accent-500" />
+                <SectionLabel>Relationship Graph</SectionLabel>
+              </div>
+              {emailGraph && emailGraph.nodes.length > 0 && (
+                <Badge variant="neutral">{emailGraph.nodes.length} nodes &middot; {emailGraph.edges.length} edges</Badge>
+              )}
+            </div>
+            {emailGraph && emailGraph.nodes.length > 0 ? (
+              <>
+                <RelationshipGraphCanvas graph={emailGraph} />
+                <Divider className="my-4" />
+                <div className="grid grid-cols-4 gap-2.5">
+                  {graphLegend.map((item) => (
+                    <LegendItem key={item.type} color={item.swatch} label={item.label} />
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="h-80 flex items-center justify-center text-[12px] text-ink-600">
+                No relationship graph data available
+              </div>
+            )}
+          </Card>
 
           <Card className="mt-5 p-5">
             <div className="flex items-center justify-between mb-4">
@@ -452,6 +538,142 @@ function LegendItem({ color, label }: { color: string; label: string }) {
     <div className="flex items-center gap-2">
       <span className={cn('w-2 h-2 rounded-full', color)} />
       <span className="text-[10px] font-medium text-ink-500 uppercase tracking-wider">{label}</span>
+    </div>
+  );
+}
+
+// Frontend F2 — real Cytoscape-backed relationship graph, fed by
+// GET /emails/:emailId/graph. Display only: no editing, no dragging
+// persistence, no export. Re-initializes (and destroys the previous
+// instance) whenever `graph` changes, so navigating between emails never
+// leaks Cytoscape instances.
+function RelationshipGraphCanvas({ graph }: { graph: ApiInfrastructureGraph }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [selectedNode, setSelectedNode] = useState<ApiInfrastructureGraphNode | null>(null);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const elements = [
+      ...graph.nodes.map((node) => ({
+        data: { id: node.id, label: node.label, type: node.type },
+      })),
+      ...graph.edges.map((edge, i) => ({
+        // Edge ids just need to be unique for Cytoscape — the same
+        // source|relationship|target can't collide since the backend
+        // already de-dupes edges (see infrastructureGraph.ts's addEdge),
+        // but the index keeps this safe regardless.
+        data: {
+          id: `edge-${i}-${edge.source}-${edge.target}`,
+          source: edge.source,
+          target: edge.target,
+          label: edge.relationship,
+        },
+      })),
+    ];
+
+    const cy = cytoscape({
+      container: containerRef.current,
+      elements,
+      style: [
+        ...(Object.keys(graphNodeStyle) as ApiInfrastructureGraphNodeType[]).map((type) => ({
+          selector: `node[type = "${type}"]`,
+          style: {
+            'background-color': graphNodeStyle[type].color,
+            shape: graphNodeStyle[type].shape,
+            width: type === 'EMAIL' ? 42 : 26,
+            height: type === 'EMAIL' ? 42 : 26,
+            label: 'data(label)',
+            'font-size': 8,
+            color: '#a3a3a3',
+            'text-valign': 'bottom',
+            'text-margin-y': 6,
+            'text-max-width': '90px',
+            'text-wrap': 'ellipsis',
+            'border-width': 1,
+            'border-color': 'rgba(255,255,255,0.15)',
+          },
+        })),
+        {
+          selector: 'node:selected',
+          style: { 'border-width': 2, 'border-color': '#ffffff' },
+        },
+        {
+          selector: 'edge',
+          style: {
+            width: 1,
+            'line-color': 'rgba(163,163,163,0.35)',
+            'target-arrow-color': 'rgba(163,163,163,0.35)',
+            'target-arrow-shape': 'triangle',
+            'arrow-scale': 0.6,
+            'curve-style': 'bezier',
+            label: 'data(label)',
+            'font-size': 6,
+            color: '#737373',
+            'text-rotation': 'autorotate',
+            'text-background-color': '#0a0a0a',
+            'text-background-opacity': 0.6,
+            'text-background-padding': '2px',
+          },
+        },
+      ] as cytoscape.Stylesheet[],
+      layout: { name: 'cose', animate: false, padding: 24 } as cytoscape.LayoutOptions,
+      minZoom: 0.3,
+      maxZoom: 2.5,
+      wheelSensitivity: 0.25,
+    });
+
+    cy.on('tap', 'node', (evt) => {
+      const nodeId = evt.target.id();
+      setSelectedNode(graph.nodes.find((n) => n.id === nodeId) ?? null);
+    });
+
+    // Tapping empty canvas clears the selection.
+    cy.on('tap', (evt) => {
+      if (evt.target === cy) setSelectedNode(null);
+    });
+
+    return () => {
+      cy.destroy();
+    };
+  }, [graph]);
+
+  return (
+    <div className="grid grid-cols-12 gap-4">
+      <div
+        ref={containerRef}
+        className="col-span-8 h-96 rounded-lg border border-base-500/20 bg-base-950/40"
+      />
+      <div className="col-span-4">
+        <div className="panel-2 p-3 h-96 overflow-y-auto scrollbar-thin">
+          <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-2">
+            {selectedNode ? 'Selected Node' : 'Node Details'}
+          </div>
+          {selectedNode ? (
+            <div className="space-y-2">
+              <PreviewField label="Type" value={selectedNode.type} />
+              <PreviewField label="Label" value={selectedNode.label} mono />
+              {selectedNode.status && <PreviewField label="Status" value={selectedNode.status} />}
+              {selectedNode.metadata && Object.keys(selectedNode.metadata).length > 0 && (
+                <div>
+                  <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mt-3 mb-1">
+                    Metadata
+                  </div>
+                  <pre className="mono text-[10px] text-ink-400 whitespace-pre-wrap break-words leading-relaxed">
+                    {JSON.stringify(selectedNode.metadata, null, 2)}
+                  </pre>
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="text-[11px] text-ink-600 leading-relaxed">
+              Click any node for its type, label, and metadata. Nodes represent emails, addresses,
+              domains, URLs, IPs, ASNs, organizations, and geolocations derived from this email's
+              stored analysis — edges show how they're connected.
+            </p>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

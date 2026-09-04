@@ -345,3 +345,65 @@ export async function getGmailStatus(): Promise<ApiGmailStatus> {
 
   return response.json();
 }
+
+// Matches the backend's InfrastructureGraphNode/Edge/InfrastructureGraph
+// types exactly (schemas/types.ts) — a Cytoscape-ready derived graph for
+// one stored email, built from analyzers/infrastructureGraph.ts.
+export type ApiInfrastructureGraphNodeType =
+  | "EMAIL"
+  | "EMAIL_ADDRESS"
+  | "DOMAIN"
+  | "URL"
+  | "IP"
+  | "ASN"
+  | "ORGANIZATION"
+  | "GEOLOCATION";
+
+export type ApiGraphProvenance =
+  | "OBSERVED"
+  | "DETERMINISTIC_ANALYSIS"
+  | "EXTERNAL_INTELLIGENCE"
+  | "INFERRED";
+
+export interface ApiInfrastructureGraphNode {
+  id: string;
+  type: ApiInfrastructureGraphNodeType;
+  label: string;
+  status?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ApiInfrastructureGraphEdge {
+  source: string;
+  target: string;
+  relationship: string;
+  provenance: ApiGraphProvenance;
+  evidence?: string[];
+}
+
+export interface ApiInfrastructureGraph {
+  nodes: ApiInfrastructureGraphNode[];
+  edges: ApiInfrastructureGraphEdge[];
+}
+
+export async function getEmailGraph(emailId: string): Promise<ApiInfrastructureGraph> {
+  if (typeof emailId !== "string" || emailId.trim() === "") {
+    throw new Error(
+      `getEmailGraph requires a non-empty emailId string, received: ${JSON.stringify(emailId)}`
+    );
+  }
+
+  const response = await fetch(`/api/v1/emails/${encodeURIComponent(emailId)}/graph`);
+
+  if (!response.ok) {
+    throw new Error(`Failed to load infrastructure graph: ${response.status}`);
+  }
+
+  // The backend wraps this as { emailId, graph: { nodes, edges } } — see
+  // routes/emails.ts's GET /emails/:emailId/graph handler. Unwrapped here
+  // so callers get exactly the InfrastructureGraph shape, matching every
+  // other getX function in this file returning its resource directly
+  // rather than its envelope.
+  const data = await response.json();
+  return data.graph;
+}
