@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowLeft, Inbox } from 'lucide-react';
 import { CaseSelector } from '@/components/CaseSelector';
@@ -41,6 +41,20 @@ export function InvestigationShell({
   onClearEmail,
   investigationNav,
 }: InvestigationShellProps) {
+  // The precise signal for "the investigation section changed" is
+  // activeSection + emailId — not the route pathname. Every one of the
+  // six investigation pages (Overview/Forensics/Indicators/
+  // Infrastructure/AI Investigation/Report) already renders this one
+  // shared shell, so resetting scroll here — keyed on that real
+  // identity — covers all of them without any page needing its own
+  // scroll-reset logic. (Layout's pathname-based reset still runs too,
+  // for navigation outside the investigation shell; the two don't
+  // conflict — both just set scrollTop to 0.)
+  useEffect(() => {
+    if (!investigationNav) return;
+    document.getElementById('app-main-scroll')?.scrollTo({ top: 0 });
+  }, [investigationNav?.activeSection, investigationNav?.emailId]);
+
   return (
     <div className="flex flex-col min-h-full">
       <div className={cn('px-8 py-6 max-w-[1600px] mx-auto w-full', investigationNav && 'pb-28')}>
