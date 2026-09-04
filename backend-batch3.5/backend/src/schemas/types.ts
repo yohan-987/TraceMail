@@ -345,6 +345,15 @@ export interface EvidenceMeta {
   fileSizeBytes: number;
   createdAt: string; // ISO timestamp
   storagePath: string; // relative path under data/emails/<emailId>/
+  // Batch 1 (Gmail): which ingestion path produced these bytes. Purely
+  // descriptive — the rest of the pipeline never branches on this, so
+  // an upload and a Gmail-sourced email get an identical analysis.
+  // Optional so pre-Gmail stored records (with no field at all) still
+  // parse correctly.
+  source?: "upload" | "gmail";
+  // Present only when source is "gmail" — the originating Gmail
+  // message ID, kept for future dedupe/traceability.
+  sourceMessageId?: string;
 }
 
 export interface EmailRecord {

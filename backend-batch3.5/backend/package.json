@@ -9,12 +9,14 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "train:ml": "tsx src/ml/trainModel.ts"
+    "train:ml": "tsx src/ml/trainModel.ts",
+    "get:gmail-token": "tsx scripts/getGmailRefreshToken.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "googleapis": "^144.0.0",
     "mailparser": "^3.7.1",
     "multer": "^2.0.0",
     "nanoid": "^3.3.7",

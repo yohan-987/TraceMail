@@ -33,7 +33,7 @@ The content is organized as follows:
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
 - Only files matching these patterns are included: FRONTEND/src/**, FRONTEND/package.json, backend-batch3.5/backend/src/**, backend-batch3.5/backend/package.json
-- Files matching these patterns are excluded: **/mockData.ts
+- Files matching these patterns are excluded: FRONTEND/src/data/mockData.ts
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 - Files are sorted by Git change count (files with more changes are at the bottom)
@@ -73,15 +73,18 @@ backend-batch3.5/
         trainModel.ts
       routes/
         emails.ts
+        gmail.ts
         health.ts
       schemas/
         llmOutput.ts
         types.ts
       services/
         dnsClient.ts
+        emailIngestPipeline.ts
         emailQuery.ts
         emailStore.ts
         geoipClient.ts
+        gmailClient.ts
         llmClient.ts
       utils/
         apiError.ts
@@ -144,6 +147,424 @@ FRONTEND/
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="backend-batch3.5/backend/src/routes/gmail.ts">
+import { Router, Request, Response } from "express";
+import { getGmailStatus } from "../services/gmailClient";
+
+export const gmailRouter = Router();
+
+// GET /api/v1/gmail/status — lets the frontend show a "Live Gmail:
+// connected / not configured" indicator without knowing anything about
+// polling internals, OAuth, or cursors.
+gmailRouter.get("/gmail/status", (_req: Request, res: Response) => {
+  res.status(200).json(getGmailStatus());
+});
+</file>
+
+<file path="backend-batch3.5/backend/src/services/emailIngestPipeline.ts">
+import { sha256 } from "../utils/hash";
+import { generateEmailId } from "../utils/ids";
+import { parseEmlBuffer } from "../analyzers/emailParser";
+import { analyzeHeaders } from "../analyzers/headerForensics";
+import { extractIOCs } from "../analyzers/iocExtractor";
+import { analyzeUrls } from "../analyzers/urlAnalyzer";
+import { analyzeDomains } from "../analyzers/domainAnalyzer";
+import { analyzeContent } from "../analyzers/contentHeuristics";
+import { computeRisk } from "../analyzers/riskEngine";
+import { assessMl, getDefaultPredictor, mlInputFromEmail } from "../analyzers/mlClassifier";
+import { assessAi } from "../analyzers/aiAssessment";
+import { analyzeInfrastructure } from "../analyzers/infrastructure";
+import { geoIpProviderFromEnv } from "./geoipClient";
+import { dnsProviderFromEnv } from "./dnsClient";
+import { llmProviderFromEnv } from "./llmClient";
+import { saveOriginalEml, saveEmailRecord } from "./emailStore";
+import type { EmailRecord } from "../schemas/types";
+
+export interface IngestEmailInput {
+  /** Raw bytes, exactly as they'll be hashed and preserved. */
+  buffer: Buffer;
+  /** Display filename — the actual upload's originalname, or a
+   *  synthesized name for non-upload sources (e.g. `gmail-<id>.eml`). */
+  filename: string;
+  caseId: string | null;
+  /** Where these bytes came from. Purely descriptive metadata — every
+   *  source produces an identical EmailRecord shape; nothing downstream
+   *  branches on this. */
+  source: "upload" | "gmail";
+  /** Gmail message ID, when source is "gmail" — lets a future dedupe
+   *  or re-poll check trace a stored record back to its Gmail message. */
+  sourceMessageId?: string;
+}
+
+/**
+ * The single ingestion pipeline every source (manual .eml upload, Gmail
+ * polling, and any future source) must go through: hash the exact bytes
+ * before anything touches them, preserve the original untouched, parse,
+ * run every analyzer, fuse risk, persist. Extracted out of
+ * routes/emails.ts (Batch 1 Gmail work) so a Gmail-sourced email is
+ * guaranteed to produce the same EmailRecord shape as an uploaded one —
+ * there is no second, parallel implementation of this pipeline anywhere.
+ */
+export async function ingestEmailBuffer(input: IngestEmailInput): Promise<EmailRecord> {
+  const { buffer, filename, caseId, source, sourceMessageId } = input;
+
+  // Hash the exact bytes BEFORE anything else touches them.
+  const evidenceHash = sha256(buffer);
+  const emailId = generateEmailId();
+
+  // Preserve the original evidence untouched on disk.
+  const storagePath = await saveOriginalEml(emailId, buffer);
+
+  // Parse — never throws; malformed input degrades to warnings on an
+  // otherwise-empty ParsedEmail rather than aborting ingestion.
+  const { parsed, warnings } = await parseEmlBuffer(emailId, buffer);
+
+  const { headerAnalysis, authentication } = analyzeHeaders(parsed);
+
+  const iocs = extractIOCs(parsed, headerAnalysis);
+  const { urlAnalysis, evidence: urlEvidence } = analyzeUrls(emailId, iocs.urls);
+  const { domainAnalysis, evidence: domainEvidence } = analyzeDomains(emailId, iocs.domains);
+  const { evidence: contentEvidence, featureCounts } = analyzeContent(parsed);
+
+  const predictor = await getDefaultPredictor();
+  const { mlAssessment, evidence: mlEvidence } = assessMl({
+    emailId,
+    input: mlInputFromEmail(parsed, iocs.urls.length, featureCounts),
+    predictor,
+  });
+
+  const [infraResult, aiResult] = await Promise.all([
+    analyzeInfrastructure({
+      emailId,
+      headerAnalysis,
+      iocs,
+      geoIp: geoIpProviderFromEnv(),
+      dns: dnsProviderFromEnv(),
+    }),
+    assessAi({
+      emailId,
+      parsed,
+      headerAnalysis,
+      authentication,
+      urlAnalysis,
+      mlAssessment,
+      provider: llmProviderFromEnv(),
+    }),
+  ]);
+
+  const explanations = [
+    ...headerAnalysis.anomalies,
+    ...urlEvidence,
+    ...domainEvidence,
+    ...contentEvidence,
+    ...mlEvidence,
+    ...aiResult.evidence,
+    ...infraResult.evidence,
+  ];
+
+  const infrastructureStatus = infraResult.infrastructure.status;
+  const risk = computeRisk(emailId, explanations, {
+    headerDataAvailable: headerAnalysis.status !== "UNAVAILABLE",
+    urlDomainApplicable: iocs.urls.length > 0 || iocs.domains.length > 0,
+    infrastructureAvailable: infrastructureStatus === "AVAILABLE",
+    infrastructureStatus,
+  });
+
+  const record: EmailRecord = {
+    emailId,
+    caseId,
+    evidence: {
+      filename,
+      sha256: evidenceHash,
+      fileSizeBytes: buffer.length,
+      createdAt: new Date().toISOString(),
+      storagePath,
+      source,
+      ...(sourceMessageId ? { sourceMessageId } : {}),
+    },
+    parsedEmail: parsed,
+    headerAnalysis,
+    authentication,
+    iocs,
+    urlAnalysis,
+    domainAnalysis,
+    risk,
+    aiAssessment: aiResult.aiAssessment,
+    infrastructure: infraResult.infrastructure,
+    report: null,
+    explanations,
+    warnings,
+    mlAssessment,
+    intelligenceAssessment: {
+      emailId,
+      status: infraResult.infrastructure.status,
+    },
+  };
+
+  await saveEmailRecord(record);
+  return record;
+}
+</file>
+
+<file path="backend-batch3.5/backend/src/services/gmailClient.ts">
+import { google, gmail_v1 } from "googleapis";
+import { promises as fs } from "fs";
+import path from "path";
+import { ingestEmailBuffer } from "./emailIngestPipeline";
+
+// Batch 1 — Gmail OAuth + polling ingestion.
+//
+// This is a second ingestion SOURCE, not a replacement for the .eml
+// upload path (routes/emails.ts). Every message this module reads is
+// fed through the exact same ingestEmailBuffer() pipeline the upload
+// route calls, so a Gmail-sourced email produces an identical
+// EmailRecord shape to an uploaded one — nothing downstream needs to
+// know or care which source an email came from.
+//
+// Deliberately polling only (no Pub/Sub push): push requires standing
+// up Cloud Pub/Sub infrastructure and a public webhook, which is real
+// engineering cost and external-dependency risk this build doesn't
+// take on. See the platform reference doc, §6.1 / §10.
+//
+// Credentials come from environment variables only — never hard-coded,
+// never logged:
+//   GMAIL_CLIENT_ID
+//   GMAIL_CLIENT_SECRET
+//   GMAIL_REFRESH_TOKEN
+//   GMAIL_POLL_INTERVAL_SECONDS  (optional, default 45)
+// The OAuth app stays in Google's "Testing" publishing status — nothing
+// here assumes production verification.
+
+const CURSOR_PATH = path.join(__dirname, "..", "..", "data", "gmail-cursor.json");
+
+interface GmailCursor {
+  historyId: string | null;
+}
+
+export interface GmailStatus {
+  configured: boolean;
+  lastPollAt: string | null;
+  lastPollMessageCount: number | null;
+}
+
+// Module-level status the /gmail/status route reads. Intentionally not
+// persisted — it's a live "what happened last poll" indicator, not
+// evidence, so it resets on restart same as the rest of the process.
+const status: GmailStatus = {
+  configured: false,
+  lastPollAt: null,
+  lastPollMessageCount: null,
+};
+
+export function getGmailStatus(): GmailStatus {
+  return { ...status };
+}
+
+function isConfigured(): boolean {
+  return Boolean(
+    process.env.GMAIL_CLIENT_ID &&
+      process.env.GMAIL_CLIENT_SECRET &&
+      process.env.GMAIL_REFRESH_TOKEN
+  );
+}
+
+function getOAuthClient() {
+  const client = new google.auth.OAuth2(
+    process.env.GMAIL_CLIENT_ID,
+    process.env.GMAIL_CLIENT_SECRET
+  );
+  // Refresh-token grant only — no interactive consent flow at runtime.
+  // Never log this credential; googleapis itself does not log it either.
+  client.setCredentials({ refresh_token: process.env.GMAIL_REFRESH_TOKEN });
+  return client;
+}
+
+async function readCursor(): Promise<GmailCursor> {
+  try {
+    const raw = await fs.readFile(CURSOR_PATH, "utf-8");
+    const parsed = JSON.parse(raw) as Partial<GmailCursor>;
+    return { historyId: parsed.historyId ?? null };
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { historyId: null };
+    }
+    // A corrupted cursor file must not crash polling — degrade to "no
+    // cursor yet" and let the next successful write repair it, same
+    // "one bad thing never breaks the pipeline" convention as the rest
+    // of the codebase.
+    console.error("[gmail] cursor file unreadable, starting fresh:", err);
+    return { historyId: null };
+  }
+}
+
+async function writeCursor(cursor: GmailCursor): Promise<void> {
+  await fs.mkdir(path.dirname(CURSOR_PATH), { recursive: true });
+  await fs.writeFile(CURSOR_PATH, JSON.stringify(cursor, null, 2), "utf-8");
+}
+
+/** Gmail's `raw` field is base64url — swap to the standard alphabet
+ *  before decoding to bytes. */
+function decodeRawMessage(raw: string): Buffer {
+  const normalized = raw.replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(normalized, "base64");
+}
+
+async function fetchAndIngestMessage(
+  gmail: gmail_v1.Gmail,
+  messageId: string
+): Promise<boolean> {
+  const msg = await gmail.users.messages.get({
+    userId: "me",
+    id: messageId,
+    format: "raw",
+  });
+  if (!msg.data.raw) return false;
+
+  const buffer = decodeRawMessage(msg.data.raw);
+  if (buffer.length === 0) return false;
+
+  await ingestEmailBuffer({
+    buffer,
+    filename: `gmail-${messageId}.eml`,
+    caseId: null,
+    source: "gmail",
+    sourceMessageId: messageId,
+  });
+  return true;
+}
+
+/**
+ * Lists messages added since the last processed historyId, ingests each
+ * through the shared pipeline, and advances the cursor. Never throws —
+ * every failure mode (auth, network, an expired/invalid historyId, one
+ * bad message) is caught, logged, and left for the next interval to
+ * retry, so a Gmail outage degrades this source without ever taking
+ * down the server or the .eml upload path.
+ *
+ * Returns the number of messages successfully ingested this cycle.
+ */
+export async function pollInbox(): Promise<number> {
+  if (!isConfigured()) {
+    status.configured = false;
+    console.log("[gmail] not configured, skipping");
+    return 0;
+  }
+  status.configured = true;
+
+  try {
+    const auth = getOAuthClient();
+    const gmail = google.gmail({ version: "v1", auth });
+    const cursor = await readCursor();
+
+    if (!cursor.historyId) {
+      // First run ever (or cursor was reset below): establish a
+      // starting point from the current profile rather than
+      // back-filling the whole mailbox on first boot.
+      const profile = await gmail.users.getProfile({ userId: "me" });
+      await writeCursor({ historyId: profile.data.historyId ?? null });
+      status.lastPollAt = new Date().toISOString();
+      status.lastPollMessageCount = 0;
+      console.log("[gmail] checked inbox, 0 new messages (cursor initialized)");
+      return 0;
+    }
+
+    let historyResponse;
+    try {
+      historyResponse = await gmail.users.history.list({
+        userId: "me",
+        startHistoryId: cursor.historyId,
+        historyTypes: ["messageAdded"],
+      });
+    } catch (err) {
+      // A historyId can go stale (mailbox history is only retained for
+      // ~a week) and Gmail returns 404 for it. Recovering means
+      // re-establishing the cursor from the current profile — this
+      // cycle's messages are skipped rather than replaying the whole
+      // mailbox, but polling recovers on its own instead of staying
+      // broken until someone notices.
+      console.error("[gmail] history.list failed, resetting cursor:", err);
+      const profile = await gmail.users.getProfile({ userId: "me" });
+      await writeCursor({ historyId: profile.data.historyId ?? null });
+      status.lastPollAt = new Date().toISOString();
+      status.lastPollMessageCount = 0;
+      return 0;
+    }
+
+    const messageIds = Array.from(
+      new Set(
+        (historyResponse.data.history ?? []).flatMap((h) =>
+          (h.messagesAdded ?? [])
+            .map((m) => m.message?.id)
+            .filter((id): id is string => Boolean(id))
+        )
+      )
+    );
+
+    let ingested = 0;
+    for (const messageId of messageIds) {
+      try {
+        const ok = await fetchAndIngestMessage(gmail, messageId);
+        if (ok) ingested += 1;
+      } catch (err) {
+        // One bad message must not stop the rest of the batch, and
+        // must not prevent the cursor from advancing past the ones
+        // that did succeed.
+        console.error(`[gmail] failed to ingest message ${messageId}:`, err);
+      }
+    }
+
+    await writeCursor({ historyId: historyResponse.data.historyId ?? cursor.historyId });
+    status.lastPollAt = new Date().toISOString();
+    status.lastPollMessageCount = ingested;
+    console.log(`[gmail] checked inbox, ${ingested} new messages`);
+    return ingested;
+  } catch (err) {
+    // Any other failure (auth rejected, network down, rate limited,
+    // etc.) — log server-side and let the next interval retry.
+    console.error("[gmail] poll cycle failed:", err);
+    status.lastPollAt = new Date().toISOString();
+    status.lastPollMessageCount = null;
+    return 0;
+  }
+}
+
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Starts the Gmail polling loop if credentials are configured. Safe to
+ * call unconditionally from server.ts on every boot — when Gmail isn't
+ * configured this is a one-line log and a no-op, so .eml upload keeps
+ * working standalone exactly as before this batch.
+ */
+export function startGmailPolling(): void {
+  if (!isConfigured()) {
+    status.configured = false;
+    console.log("[gmail] not configured, skipping");
+    return;
+  }
+  if (pollTimer) return; // already running
+
+  const intervalSeconds = Number(process.env.GMAIL_POLL_INTERVAL_SECONDS ?? 45);
+  const intervalMs = Math.max(Number.isFinite(intervalSeconds) ? intervalSeconds : 45, 1) * 1000;
+
+  // Fire once immediately so a configured inbox doesn't wait a full
+  // interval for its first poll, then continue on the interval.
+  void pollInbox();
+  pollTimer = setInterval(() => {
+    void pollInbox();
+  }, intervalMs);
+}
+
+/** Exposed for tests / graceful shutdown — not currently called from
+ *  server.ts, since the process exiting clears the interval anyway. */
+export function stopGmailPolling(): void {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+</file>
 
 <file path="backend-batch3.5/backend/src/analyzers/contentHeuristics.ts">
 import type { ParsedEmail, RiskEvidenceItem } from "../schemas/types";
@@ -3473,6 +3894,7 @@ export function normalizedSimilarity(a: string, b: string): number {
 <file path="backend-batch3.5/backend/src/server.ts">
 import "dotenv/config";
 import { createApp } from "./app";
+import { startGmailPolling } from "./services/gmailClient";
 
 const PORT = Number(process.env.PORT ?? 4000);
 const app = createApp();
@@ -3480,6 +3902,11 @@ const app = createApp();
 app.listen(PORT, () => {
   console.log(`SIH26106 backend listening on http://localhost:${PORT}`);
 });
+
+// Batch 1 — Gmail polling. No-ops with a log line when GMAIL_CLIENT_ID /
+// GMAIL_CLIENT_SECRET / GMAIL_REFRESH_TOKEN aren't set, so the server
+// still runs normally with just .eml upload when Gmail isn't configured.
+startGmailPolling();
 </file>
 
 <file path="backend-batch3.5/backend/package.json">
@@ -3500,6 +3927,7 @@ app.listen(PORT, () => {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "googleapis": "^144.0.0",
     "mailparser": "^3.7.1",
     "multer": "^2.0.0",
     "nanoid": "^3.3.7",
@@ -4363,115 +4791,6 @@ export function InvestigationNavigation({ emailId, activeSection }: Investigatio
           );
         })}
       </div>
-    </div>
-  );
-}
-</file>
-
-<file path="FRONTEND/src/components/InvestigationShell.tsx">
-import type { ReactNode } from 'react';
-import { Link } from 'react-router-dom';
-import { ArrowLeft, Inbox } from 'lucide-react';
-import { CaseSelector } from '@/components/CaseSelector';
-import { InvestigationNavigation, type InvestigationSection } from '@/components/InvestigationNavigation';
-import type { ScannedEmail } from '@/data/mockData';
-import { cn } from '@/lib/utils';
-
-interface InvestigationShellProps {
-  breadcrumb: string;
-  title: string;
-  subtitle?: string;
-  actions?: ReactNode;
-  children: ReactNode;
-  /** Hide the compact case-switcher dropdown — used when the page body already
-   *  renders the full email table (InvestigationWorkspace) as the selector. */
-  hideCaseSelector?: boolean;
-  /** This page's own locally-selected email (not global) — powers the switcher. */
-  selectedEmail?: ScannedEmail | null;
-  availableEmails?: ScannedEmail[];
-  onSelectEmail?: (id: string) => void;
-  onClearEmail?: () => void;
-  /**
-   * Pass this ONLY once a specific email has entered the full investigation
-   * workspace for this page (never while merely browsing the table) — it
-   * renders the shared persistent bottom navigation for that email.
-   */
-  investigationNav?: { emailId: string; activeSection: InvestigationSection };
-}
-
-export function InvestigationShell({
-  breadcrumb,
-  title,
-  subtitle,
-  actions,
-  children,
-  hideCaseSelector,
-  selectedEmail,
-  availableEmails,
-  onSelectEmail,
-  onClearEmail,
-  investigationNav,
-}: InvestigationShellProps) {
-  return (
-    <div className="flex flex-col min-h-full">
-      <div className={cn('px-8 py-6 max-w-[1600px] mx-auto w-full', investigationNav && 'pb-28')}>
-        {/* Breadcrumb */}
-        <div className="flex items-center gap-2 mb-4 print:hidden">
-          <Link to="/investigation" className="flex items-center gap-1 text-[11px] font-medium text-ink-500 hover:text-accent-400 transition-colors uppercase tracking-wider">
-            <ArrowLeft className="w-3 h-3" /> Investigation
-          </Link>
-          <span className="text-ink-700 text-xs">/</span>
-          <span className="text-[11px] font-medium text-ink-400 uppercase tracking-wider">{breadcrumb}</span>
-        </div>
-
-        {/* Case selector — hidden when the full email table is already shown below */}
-        {!hideCaseSelector && onSelectEmail && onClearEmail && (
-          <CaseSelector
-            className="mb-5 print:hidden"
-            selected={selectedEmail ?? null}
-            availableEmails={availableEmails ?? []}
-            onSelect={onSelectEmail}
-            onClear={onClearEmail}
-          />
-        )}
-
-        {/* Page heading */}
-        <div className="flex items-end justify-between mb-6">
-          <div>
-            <h1 className="text-xl font-bold text-ink-50">{title}</h1>
-            {subtitle && <p className="text-xs text-ink-500 mt-1">{subtitle}</p>}
-          </div>
-          <div className="print:hidden">{actions}</div>
-        </div>
-
-        {children}
-      </div>
-
-      {/* Persistent investigation navigation — only rendered once a specific
-          email is open in the full workspace, per the visibility rule. */}
-      {investigationNav && (
-        <InvestigationNavigation emailId={investigationNav.emailId} activeSection={investigationNav.activeSection} />
-      )}
-    </div>
-  );
-}
-
-export function EmptyCaseState() {
-  return (
-    <div className="flex flex-col items-center justify-center py-20 rounded-xl border border-dashed border-base-500/30 bg-base-800/30">
-      <div className="flex items-center justify-center w-14 h-14 rounded-xl bg-base-800 border border-base-500/30 mb-5">
-        <Inbox className="w-6 h-6 text-ink-600" />
-      </div>
-      <h2 className="text-lg font-semibold text-ink-200">No Case Selected</h2>
-      <p className="text-sm text-ink-500 mt-2 mb-5 text-center max-w-md">
-        Select an email from the case selector above to begin investigation.
-      </p>
-      <Link
-        to="/"
-        className="flex items-center gap-2 px-4 py-2 rounded-lg text-[11px] font-bold text-accent-400 bg-accent-700/10 border border-accent-700/30 hover:bg-accent-700/20 transition-colors uppercase tracking-wider"
-      >
-        <ArrowLeft className="w-3 h-3" /> Go to Triage Dashboard
-      </Link>
     </div>
   );
 }
@@ -7102,6 +7421,7 @@ import cors from "cors";
 import multer from "multer";
 import { healthRouter } from "./routes/health";
 import { emailsRouter } from "./routes/emails";
+import { gmailRouter } from "./routes/gmail";
 import { ApiError } from "./utils/apiError";
 import type { ApiErrorBody } from "./schemas/types";
 
@@ -7132,6 +7452,7 @@ export function createApp() {
 
   app.use("/api/v1", healthRouter);
   app.use("/api/v1", emailsRouter);
+  app.use("/api/v1", gmailRouter);
 
   app.get("/", (_req, res) => {
     res.status(200).json({ service: "sih26106-backend", ok: true });
@@ -7332,42 +7653,6 @@ export function Header() {
         <ProfilePanel />
       </div>
     </header>
-  );
-}
-</file>
-
-<file path="FRONTEND/src/components/layout/Layout.tsx">
-import { useEffect, useRef } from 'react';
-import { Outlet, useLocation } from 'react-router-dom';
-import { Sidebar } from '@/components/layout/Sidebar';
-import { Header } from '@/components/layout/Header';
-
-export function Layout() {
-  // `main` below is the app's single scroll container (Layout persists
-  // across route changes — only the Outlet's child swaps — so its
-  // scrollTop is NOT reset by the browser the way a full page load
-  // would be). Without this, switching investigation tabs (Overview /
-  // Forensics / Indicators / Infrastructure / AI Investigation /
-  // Report) keeps whatever scroll position the previous tab was left
-  // at. Implemented once here, centrally, rather than duplicated in
-  // every page.
-  const mainRef = useRef<HTMLElement>(null);
-  const location = useLocation();
-
-  useEffect(() => {
-    mainRef.current?.scrollTo({ top: 0 });
-  }, [location.pathname]);
-
-  return (
-    <div className="flex min-h-screen bg-base-950 bg-grid-subtle bg-grid-sm">
-      <Sidebar />
-      <div className="flex-1 flex flex-col min-w-0">
-        <Header />
-        <main ref={mainRef} className="flex-1 overflow-y-auto scrollbar-thin">
-          <Outlet />
-        </main>
-      </div>
-    </div>
   );
 }
 </file>
@@ -7676,6 +7961,129 @@ export function StatusIcon({ status, className }: { status: EmailStatus; classNa
   const icons = { safe: ShieldCheck, suspicious: ShieldAlert, malicious: ShieldX, inconclusive: Inbox };
   const Icon = icons[status];
   return <Icon className={className} />;
+}
+</file>
+
+<file path="FRONTEND/src/components/InvestigationShell.tsx">
+import { useEffect, type ReactNode } from 'react';
+import { Link } from 'react-router-dom';
+import { ArrowLeft, Inbox } from 'lucide-react';
+import { CaseSelector } from '@/components/CaseSelector';
+import { InvestigationNavigation, type InvestigationSection } from '@/components/InvestigationNavigation';
+import type { ScannedEmail } from '@/data/mockData';
+import { cn } from '@/lib/utils';
+
+interface InvestigationShellProps {
+  breadcrumb: string;
+  title: string;
+  subtitle?: string;
+  actions?: ReactNode;
+  children: ReactNode;
+  /** Hide the compact case-switcher dropdown — used when the page body already
+   *  renders the full email table (InvestigationWorkspace) as the selector. */
+  hideCaseSelector?: boolean;
+  /** This page's own locally-selected email (not global) — powers the switcher. */
+  selectedEmail?: ScannedEmail | null;
+  availableEmails?: ScannedEmail[];
+  onSelectEmail?: (id: string) => void;
+  onClearEmail?: () => void;
+  /**
+   * Pass this ONLY once a specific email has entered the full investigation
+   * workspace for this page (never while merely browsing the table) — it
+   * renders the shared persistent bottom navigation for that email.
+   */
+  investigationNav?: { emailId: string; activeSection: InvestigationSection };
+}
+
+export function InvestigationShell({
+  breadcrumb,
+  title,
+  subtitle,
+  actions,
+  children,
+  hideCaseSelector,
+  selectedEmail,
+  availableEmails,
+  onSelectEmail,
+  onClearEmail,
+  investigationNav,
+}: InvestigationShellProps) {
+  // The precise signal for "the investigation section changed" is
+  // activeSection + emailId — not the route pathname. Every one of the
+  // six investigation pages (Overview/Forensics/Indicators/
+  // Infrastructure/AI Investigation/Report) already renders this one
+  // shared shell, so resetting scroll here — keyed on that real
+  // identity — covers all of them without any page needing its own
+  // scroll-reset logic. (Layout's pathname-based reset still runs too,
+  // for navigation outside the investigation shell; the two don't
+  // conflict — both just set scrollTop to 0.)
+  useEffect(() => {
+    if (!investigationNav) return;
+    document.getElementById('app-main-scroll')?.scrollTo({ top: 0 });
+  }, [investigationNav?.activeSection, investigationNav?.emailId]);
+
+  return (
+    <div className="flex flex-col min-h-full">
+      <div className={cn('px-8 py-6 max-w-[1600px] mx-auto w-full', investigationNav && 'pb-28')}>
+        {/* Breadcrumb */}
+        <div className="flex items-center gap-2 mb-4 print:hidden">
+          <Link to="/investigation" className="flex items-center gap-1 text-[11px] font-medium text-ink-500 hover:text-accent-400 transition-colors uppercase tracking-wider">
+            <ArrowLeft className="w-3 h-3" /> Investigation
+          </Link>
+          <span className="text-ink-700 text-xs">/</span>
+          <span className="text-[11px] font-medium text-ink-400 uppercase tracking-wider">{breadcrumb}</span>
+        </div>
+
+        {/* Case selector — hidden when the full email table is already shown below */}
+        {!hideCaseSelector && onSelectEmail && onClearEmail && (
+          <CaseSelector
+            className="mb-5 print:hidden"
+            selected={selectedEmail ?? null}
+            availableEmails={availableEmails ?? []}
+            onSelect={onSelectEmail}
+            onClear={onClearEmail}
+          />
+        )}
+
+        {/* Page heading */}
+        <div className="flex items-end justify-between mb-6">
+          <div>
+            <h1 className="text-xl font-bold text-ink-50">{title}</h1>
+            {subtitle && <p className="text-xs text-ink-500 mt-1">{subtitle}</p>}
+          </div>
+          <div className="print:hidden">{actions}</div>
+        </div>
+
+        {children}
+      </div>
+
+      {/* Persistent investigation navigation — only rendered once a specific
+          email is open in the full workspace, per the visibility rule. */}
+      {investigationNav && (
+        <InvestigationNavigation emailId={investigationNav.emailId} activeSection={investigationNav.activeSection} />
+      )}
+    </div>
+  );
+}
+
+export function EmptyCaseState() {
+  return (
+    <div className="flex flex-col items-center justify-center py-20 rounded-xl border border-dashed border-base-500/30 bg-base-800/30">
+      <div className="flex items-center justify-center w-14 h-14 rounded-xl bg-base-800 border border-base-500/30 mb-5">
+        <Inbox className="w-6 h-6 text-ink-600" />
+      </div>
+      <h2 className="text-lg font-semibold text-ink-200">No Case Selected</h2>
+      <p className="text-sm text-ink-500 mt-2 mb-5 text-center max-w-md">
+        Select an email from the case selector above to begin investigation.
+      </p>
+      <Link
+        to="/"
+        className="flex items-center gap-2 px-4 py-2 rounded-lg text-[11px] font-bold text-accent-400 bg-accent-700/10 border border-accent-700/30 hover:bg-accent-700/20 transition-colors uppercase tracking-wider"
+      >
+        <ArrowLeft className="w-3 h-3" /> Go to Triage Dashboard
+      </Link>
+    </div>
+  );
 }
 </file>
 
@@ -9687,6 +10095,58 @@ export function llmProviderFromEnv(): LlmProvider | null {
 }
 
 export { TimeoutError };
+</file>
+
+<file path="FRONTEND/src/components/layout/Layout.tsx">
+import { useEffect, useRef } from 'react';
+import { Outlet, useLocation } from 'react-router-dom';
+import { Sidebar } from '@/components/layout/Sidebar';
+import { Header } from '@/components/layout/Header';
+
+export function Layout() {
+  // `main` is the app's single real scroll container — it must have a
+  // BOUNDED height (via h-screen + overflow-hidden on this shell, plus
+  // min-h-0 threaded down through every flex ancestor) for its own
+  // overflow-y-auto to ever actually engage. Without min-h-0, a flex
+  // item's default `min-height: auto` lets it grow past its allotted
+  // space instead of clipping/scrolling — so `main` would just grow
+  // taller than the viewport and the BROWSER WINDOW would scroll the
+  // whole shell (sidebar included) instead of `main` scrolling
+  // internally. That silently broke two things at once: this
+  // pathname-based reset (resetting scrollTop on an element that
+  // never actually held any offset) and the investigation workspace's
+  // independent left/right scroll panes (real, but invisible while
+  // the whole page scrolls together above them).
+  //
+  // Layout persists across route changes (only the Outlet's child
+  // swaps), so `main`'s scrollTop is NOT reset by the browser the way
+  // a full page load would be — switching investigation tabs (Overview
+  // / Forensics / Indicators / Infrastructure / AI Investigation /
+  // Report) would otherwise keep whatever scroll position the previous
+  // tab was left at. This pathname-keyed effect covers ordinary
+  // top-level navigation; InvestigationShell additionally resets on
+  // investigation-section identity specifically (see there) since
+  // that's the more precise signal for tab switches within a single
+  // full-investigation view.
+  const mainRef = useRef<HTMLElement>(null);
+  const location = useLocation();
+
+  useEffect(() => {
+    mainRef.current?.scrollTo({ top: 0 });
+  }, [location.pathname]);
+
+  return (
+    <div className="flex h-screen overflow-hidden bg-base-950 bg-grid-subtle bg-grid-sm">
+      <Sidebar />
+      <div className="flex-1 flex flex-col min-w-0 min-h-0">
+        <Header />
+        <main id="app-main-scroll" ref={mainRef} className="flex-1 min-h-0 overflow-y-auto scrollbar-thin">
+          <Outlet />
+        </main>
+      </div>
+    </div>
+  );
+}
 </file>
 
 <file path="FRONTEND/src/components/InvestigationWorkspace.tsx">
@@ -12740,6 +13200,15 @@ export interface EvidenceMeta {
   fileSizeBytes: number;
   createdAt: string; // ISO timestamp
   storagePath: string; // relative path under data/emails/<emailId>/
+  // Batch 1 (Gmail): which ingestion path produced these bytes. Purely
+  // descriptive — the rest of the pipeline never branches on this, so
+  // an upload and a Gmail-sourced email get an identical analysis.
+  // Optional so pre-Gmail stored records (with no field at all) still
+  // parse correctly.
+  source?: "upload" | "gmail";
+  // Present only when source is "gmail" — the originating Gmail
+  // message ID, kept for future dedupe/traceability.
+  sourceMessageId?: string;
 }
 
 export interface EmailRecord {
@@ -13230,37 +13699,21 @@ export async function scanEmail(file: File) {
 <file path="backend-batch3.5/backend/src/routes/emails.ts">
 import { Router, Request, Response, NextFunction } from "express";
 import { uploadEml } from "../utils/upload";
-import { sha256 } from "../utils/hash";
-import { generateEmailId } from "../utils/ids";
 import { assertSafeFilename } from "../utils/filename";
 import { Errors } from "../utils/apiError";
-import { parseEmlBuffer } from "../analyzers/emailParser";
-import { analyzeHeaders } from "../analyzers/headerForensics";
-import { extractIOCs } from "../analyzers/iocExtractor";
-import { analyzeUrls } from "../analyzers/urlAnalyzer";
-import { analyzeDomains } from "../analyzers/domainAnalyzer";
-import { analyzeContent } from "../analyzers/contentHeuristics";
-import { computeRisk } from "../analyzers/riskEngine";
-import { assessMl, getDefaultPredictor, mlInputFromEmail } from "../analyzers/mlClassifier";
-import { assessAi } from "../analyzers/aiAssessment";
-import { analyzeInfrastructure } from "../analyzers/infrastructure";
 import { buildInfrastructureGraph } from "../analyzers/infrastructureGraph";
 import { correlateEmail } from "../analyzers/correlation";
 import { generateRecommendations } from "../analyzers/recommendations";
 import { buildForensicReport } from "../analyzers/reportBuilder";
-import { geoIpProviderFromEnv } from "../services/geoipClient";
-import { dnsProviderFromEnv } from "../services/dnsClient";
-import { llmProviderFromEnv } from "../services/llmClient";
+import { ingestEmailBuffer } from "../services/emailIngestPipeline";
 import {
-  saveOriginalEml,
-  saveEmailRecord,
   getEmailRecord,
   listEmailSummaries,
   listAllEmailRecords,
   toPublicEmailRecord,
 } from "../services/emailStore";
 import { applyEmailListQuery, parseEmailListQuery } from "../services/emailQuery";
-import type { EmailRecord, ScanAcceptedResponse } from "../schemas/types";
+import type { ScanAcceptedResponse } from "../schemas/types";
 
 export const emailsRouter = Router();
 
@@ -13287,6 +13740,10 @@ emailsRouter.param("emailId", (req: Request, res: Response, next: NextFunction, 
 // the deterministic risk engine now run here too.
 // Batch 4: ML, LLM, GeoIP, and DNS enrichment run here as optional
 // layers. Missing providers must not fail the scan.
+// Batch 1 (Gmail): the actual hash -> parse -> analyze -> persist chain
+// now lives in services/emailIngestPipeline.ts, shared with Gmail
+// polling — this handler only does upload-specific validation and
+// shapes the response.
 emailsRouter.post(
   "/emails/scan",
   uploadEml.single("file"),
@@ -13304,110 +13761,12 @@ emailsRouter.post(
           ? req.body.caseId.trim()
           : null;
 
-      // Hash the exact uploaded bytes BEFORE anything else touches them.
-      const evidenceHash = sha256(file.buffer);
-      const emailId = generateEmailId();
-
-      // Preserve the original evidence untouched on disk.
-      const storagePath = await saveOriginalEml(emailId, file.buffer);
-
-      // Parse — never throws; malformed input degrades to warnings on
-      // an otherwise-empty ParsedEmail rather than aborting the scan.
-      const { parsed, warnings } = await parseEmlBuffer(emailId, file.buffer);
-
-      // Batch 2: header/authentication forensics run on the parsed
-      // structure — no re-parsing of the raw email needed.
-      const { headerAnalysis, authentication } = analyzeHeaders(parsed);
-
-      // Batch 3: IOCs reuse headerAnalysis's already-parsed Received
-      // chain IPs rather than re-deriving them.
-      const iocs = extractIOCs(parsed, headerAnalysis);
-      const { urlAnalysis, evidence: urlEvidence } = analyzeUrls(emailId, iocs.urls);
-      const { domainAnalysis, evidence: domainEvidence } = analyzeDomains(emailId, iocs.domains);
-      const { evidence: contentEvidence, featureCounts } = analyzeContent(parsed);
-
-      const predictor = await getDefaultPredictor();
-      const { mlAssessment, evidence: mlEvidence } = assessMl({
-        emailId,
-        input: mlInputFromEmail(parsed, iocs.urls.length, featureCounts),
-        predictor,
-      });
-
-      const [infraResult, aiResult] = await Promise.all([
-        analyzeInfrastructure({
-          emailId,
-          headerAnalysis,
-          iocs,
-          geoIp: geoIpProviderFromEnv(),
-          dns: dnsProviderFromEnv(),
-        }),
-        assessAi({
-          emailId,
-          parsed,
-          headerAnalysis,
-          authentication,
-          urlAnalysis,
-          mlAssessment,
-          provider: llmProviderFromEnv(),
-        }),
-      ]);
-
-      // Every RiskEvidenceItem across all analyzers feeds the risk
-      // engine, which combines them per-category with a non-additive
-      // aggregation (see riskEngine.ts) — never a blind sum, so
-      // correlated signals like SPF/DKIM/DMARC don't double-count.
-      // ML/AI items are additional content evidence; they do not replace
-      // deterministic findings.
-      const explanations = [
-        ...headerAnalysis.anomalies,
-        ...urlEvidence,
-        ...domainEvidence,
-        ...contentEvidence,
-        ...mlEvidence,
-        ...aiResult.evidence,
-        ...infraResult.evidence,
-      ];
-      // Availability context: only the caller knows whether an empty
-      // category means "checked, found nothing" vs "nothing to check" —
-      // see RiskComputationContext in riskEngine.ts.
-      const infrastructureStatus = infraResult.infrastructure.status;
-      const risk = computeRisk(emailId, explanations, {
-        headerDataAvailable: headerAnalysis.status !== "UNAVAILABLE",
-        urlDomainApplicable: iocs.urls.length > 0 || iocs.domains.length > 0,
-        infrastructureAvailable: infrastructureStatus === "AVAILABLE",
-        infrastructureStatus,
-      });
-
-      const record: EmailRecord = {
-        emailId,
+      const record = await ingestEmailBuffer({
+        buffer: file.buffer,
+        filename: file.originalname,
         caseId,
-        evidence: {
-          filename: file.originalname,
-          sha256: evidenceHash,
-          fileSizeBytes: file.buffer.length,
-          createdAt: new Date().toISOString(),
-          storagePath,
-        },
-        parsedEmail: parsed,
-        headerAnalysis,
-        authentication,
-        iocs,
-        urlAnalysis,
-        domainAnalysis,
-        risk,
-        aiAssessment: aiResult.aiAssessment,
-        infrastructure: infraResult.infrastructure,
-        report: null,
-        explanations,
-        warnings,
-        mlAssessment,
-        intelligenceAssessment: {
-          emailId,
-          status: infraResult.infrastructure.status,
-        },
-      };
-
-      await saveEmailRecord(record);
+        source: "upload",
+      });
 
       const response: ScanAcceptedResponse = {
         emailId: record.emailId,

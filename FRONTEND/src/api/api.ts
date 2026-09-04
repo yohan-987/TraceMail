@@ -322,3 +322,26 @@ export async function scanEmail(file: File) {
 
   return response.json();
 }
+// The shape returned by GET /api/v1/gmail/status (Batch 1 Gmail polling).
+// `configured` is false whenever the backend's GMAIL_CLIENT_ID /
+// GMAIL_CLIENT_SECRET / GMAIL_REFRESH_TOKEN env vars aren't all set — in
+// that case lastPollAt/lastPollMessageCount are always null, since polling
+// never started. `lastPollMessageCount` can itself be null even when
+// configured, if the most recent poll cycle failed outright (see
+// gmailClient.ts's pollInbox catch path) — that's a distinct state from
+// "polled successfully, found 0 new messages" (which is 0, not null).
+export interface ApiGmailStatus {
+  configured: boolean;
+  lastPollAt: string | null;
+  lastPollMessageCount: number | null;
+}
+
+export async function getGmailStatus(): Promise<ApiGmailStatus> {
+  const response = await fetch("/api/v1/gmail/status");
+
+  if (!response.ok) {
+    throw new Error(`Failed to load Gmail status: ${response.status}`);
+  }
+
+  return response.json();
+}

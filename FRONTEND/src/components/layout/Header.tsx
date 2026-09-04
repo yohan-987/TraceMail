@@ -4,6 +4,7 @@ import { useTheme } from '@/context/ThemeContext';
 import { GlobalSearch } from '@/components/GlobalSearch';
 import { NotificationsPanel } from '@/components/NotificationsPanel';
 import { ProfilePanel } from '@/components/ProfilePanel';
+import { GmailStatusIndicator } from '@/components/GmailStatusIndicator';
 
 export function Header() {
   // There is no global "active case" in this app — each investigation page
@@ -37,6 +38,8 @@ export function Header() {
       </div>
 
       <div className="flex items-center gap-1 shrink-0">
+        <GmailStatusIndicator />
+        <div className="w-px h-5 bg-base-500/30 mx-2" />
         <button
           onClick={toggleTheme}
           aria-label="Toggle theme"

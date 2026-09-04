@@ -1,36 +1,20 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { uploadEml } from "../utils/upload";
-import { sha256 } from "../utils/hash";
-import { generateEmailId } from "../utils/ids";
 import { assertSafeFilename } from "../utils/filename";
 import { Errors } from "../utils/apiError";
-import { parseEmlBuffer } from "../analyzers/emailParser";
-import { analyzeHeaders } from "../analyzers/headerForensics";
-import { extractIOCs } from "../analyzers/iocExtractor";
-import { analyzeUrls } from "../analyzers/urlAnalyzer";
-import { analyzeDomains } from "../analyzers/domainAnalyzer";
-import { analyzeContent } from "../analyzers/contentHeuristics";
-import { computeRisk } from "../analyzers/riskEngine";
-import { assessMl, getDefaultPredictor, mlInputFromEmail } from "../analyzers/mlClassifier";
-import { assessAi } from "../analyzers/aiAssessment";
-import { analyzeInfrastructure } from "../analyzers/infrastructure";
 import { buildInfrastructureGraph } from "../analyzers/infrastructureGraph";
 import { correlateEmail } from "../analyzers/correlation";
 import { generateRecommendations } from "../analyzers/recommendations";
 import { buildForensicReport } from "../analyzers/reportBuilder";
-import { geoIpProviderFromEnv } from "../services/geoipClient";
-import { dnsProviderFromEnv } from "../services/dnsClient";
-import { llmProviderFromEnv } from "../services/llmClient";
+import { ingestEmailBuffer } from "../services/emailIngestPipeline";
 import {
-  saveOriginalEml,
-  saveEmailRecord,
   getEmailRecord,
   listEmailSummaries,
   listAllEmailRecords,
   toPublicEmailRecord,
 } from "../services/emailStore";
 import { applyEmailListQuery, parseEmailListQuery } from "../services/emailQuery";
-import type { EmailRecord, ScanAcceptedResponse } from "../schemas/types";
+import type { ScanAcceptedResponse } from "../schemas/types";
 
 export const emailsRouter = Router();
 
@@ -57,6 +41,10 @@ emailsRouter.param("emailId", (req: Request, res: Response, next: NextFunction, 
 // the deterministic risk engine now run here too.
 // Batch 4: ML, LLM, GeoIP, and DNS enrichment run here as optional
 // layers. Missing providers must not fail the scan.
+// Batch 1 (Gmail): the actual hash -> parse -> analyze -> persist chain
+// now lives in services/emailIngestPipeline.ts, shared with Gmail
+// polling — this handler only does upload-specific validation and
+// shapes the response.
 emailsRouter.post(
   "/emails/scan",
   uploadEml.single("file"),
@@ -74,110 +62,12 @@ emailsRouter.post(
           ? req.body.caseId.trim()
           : null;
 
-      // Hash the exact uploaded bytes BEFORE anything else touches them.
-      const evidenceHash = sha256(file.buffer);
-      const emailId = generateEmailId();
-
-      // Preserve the original evidence untouched on disk.
-      const storagePath = await saveOriginalEml(emailId, file.buffer);
-
-      // Parse — never throws; malformed input degrades to warnings on
-      // an otherwise-empty ParsedEmail rather than aborting the scan.
-      const { parsed, warnings } = await parseEmlBuffer(emailId, file.buffer);
-
-      // Batch 2: header/authentication forensics run on the parsed
-      // structure — no re-parsing of the raw email needed.
-      const { headerAnalysis, authentication } = analyzeHeaders(parsed);
-
-      // Batch 3: IOCs reuse headerAnalysis's already-parsed Received
-      // chain IPs rather than re-deriving them.
-      const iocs = extractIOCs(parsed, headerAnalysis);
-      const { urlAnalysis, evidence: urlEvidence } = analyzeUrls(emailId, iocs.urls);
-      const { domainAnalysis, evidence: domainEvidence } = analyzeDomains(emailId, iocs.domains);
-      const { evidence: contentEvidence, featureCounts } = analyzeContent(parsed);
-
-      const predictor = await getDefaultPredictor();
-      const { mlAssessment, evidence: mlEvidence } = assessMl({
-        emailId,
-        input: mlInputFromEmail(parsed, iocs.urls.length, featureCounts),
-        predictor,
-      });
-
-      const [infraResult, aiResult] = await Promise.all([
-        analyzeInfrastructure({
-          emailId,
-          headerAnalysis,
-          iocs,
-          geoIp: geoIpProviderFromEnv(),
-          dns: dnsProviderFromEnv(),
-        }),
-        assessAi({
-          emailId,
-          parsed,
-          headerAnalysis,
-          authentication,
-          urlAnalysis,
-          mlAssessment,
-          provider: llmProviderFromEnv(),
-        }),
-      ]);
-
-      // Every RiskEvidenceItem across all analyzers feeds the risk
-      // engine, which combines them per-category with a non-additive
-      // aggregation (see riskEngine.ts) — never a blind sum, so
-      // correlated signals like SPF/DKIM/DMARC don't double-count.
-      // ML/AI items are additional content evidence; they do not replace
-      // deterministic findings.
-      const explanations = [
-        ...headerAnalysis.anomalies,
-        ...urlEvidence,
-        ...domainEvidence,
-        ...contentEvidence,
-        ...mlEvidence,
-        ...aiResult.evidence,
-        ...infraResult.evidence,
-      ];
-      // Availability context: only the caller knows whether an empty
-      // category means "checked, found nothing" vs "nothing to check" —
-      // see RiskComputationContext in riskEngine.ts.
-      const infrastructureStatus = infraResult.infrastructure.status;
-      const risk = computeRisk(emailId, explanations, {
-        headerDataAvailable: headerAnalysis.status !== "UNAVAILABLE",
-        urlDomainApplicable: iocs.urls.length > 0 || iocs.domains.length > 0,
-        infrastructureAvailable: infrastructureStatus === "AVAILABLE",
-        infrastructureStatus,
-      });
-
-      const record: EmailRecord = {
-        emailId,
+      const record = await ingestEmailBuffer({
+        buffer: file.buffer,
+        filename: file.originalname,
         caseId,
-        evidence: {
-          filename: file.originalname,
-          sha256: evidenceHash,
-          fileSizeBytes: file.buffer.length,
-          createdAt: new Date().toISOString(),
-          storagePath,
-        },
-        parsedEmail: parsed,
-        headerAnalysis,
-        authentication,
-        iocs,
-        urlAnalysis,
-        domainAnalysis,
-        risk,
-        aiAssessment: aiResult.aiAssessment,
-        infrastructure: infraResult.infrastructure,
-        report: null,
-        explanations,
-        warnings,
-        mlAssessment,
-        intelligenceAssessment: {
-          emailId,
-          status: infraResult.infrastructure.status,
-        },
-      };
-
-      await saveEmailRecord(record);
+        source: "upload",
+      });
 
       const response: ScanAcceptedResponse = {
         emailId: record.emailId,
