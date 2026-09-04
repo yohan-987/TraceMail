@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Search,
@@ -17,8 +17,9 @@ import {
 } from 'lucide-react';
 import { Card, SectionLabel, Badge, Divider } from '@/components/ui/Primitives';
 import { PreviewField } from '@/components/InvestigationWorkspace';
-import { mockEmails, type EmailStatus, type ScannedEmail } from '@/data/mockData';
+import { type EmailStatus, type ScannedEmail } from '@/types/email';
 import { useActiveCase } from '@/context/ActiveCaseContext';
+import { getRelatedEmails, type ApiRelatedEmails, type ApiRecommendation } from '@/api/api';
 import { cn } from '@/lib/utils';
 
 type FilterKey = 'all' | 'safe' | 'suspicious' | 'malicious' | 'inconclusive';
@@ -47,22 +48,26 @@ const statusColor: Record<EmailStatus, string> = {
   inconclusive: 'text-ink-400',
 };
 
-/** Recommended action already exists in the shared dataset — every email's
- *  report includes a RECOMMENDATIONS section. Reused as-is, never invented. */
-function getRecommendedAction(email: ScannedEmail): string | null {
-  return email.reportSections.find((s) => s.title === 'RECOMMENDATIONS')?.content ?? null;
+/** Real API-backed emails never populate reportSections (see
+ *  emailMapper.ts — hardcoded to []); recommendations come from the
+ *  backend's `recommendations` field instead, mapped onto
+ *  recommendedActions. The top-priority recommendation is what's
+ *  useful in a compact preview — the full list belongs to Reports. */
+function getRecommendedAction(email: ScannedEmail): ApiRecommendation | null {
+  return email.recommendedActions?.[0] ?? null;
 }
 
-/** Related-email count is computed from the real shared dataset — how many
- *  OTHER emails carry the same non-empty caseId. Honest even when it's 0. */
-function getRelatedEmailCount(email: ScannedEmail): number {
+/** Related-email count is computed from the real, already-fetched
+ *  availableEmails list — how many OTHER emails carry the same
+ *  non-empty caseId. Honest even when it's 0. */
+function getRelatedEmailCount(email: ScannedEmail, allEmails: ScannedEmail[]): number {
   if (!email.caseId) return 0;
-  return mockEmails.filter((e) => e.caseId === email.caseId && e.id !== email.id).length;
+  return allEmails.filter((e) => e.caseId === email.caseId && e.id !== email.id).length;
 }
 
 export function CasesPage() {
   const navigate = useNavigate();
-  const { lastViewedEmailId, setLastViewed } = useActiveCase();
+  const { lastViewedEmailId, setLastViewed, availableEmails } = useActiveCase();
   const [filter, setFilter] = useState<FilterKey>('all');
   const [caseFilter, setCaseFilter] = useState<CaseFilter>('all');
   const [query, setQuery] = useState('');
@@ -74,18 +79,46 @@ export function CasesPage() {
   // hands off to the Investigation hub.
   const [selectedEmailId, setSelectedEmailId] = useState<string | null>(null);
 
+  // Real campaign correlation for whichever email is selected — fetched
+  // separately from the email list itself, same pattern as
+  // InfrastructurePage.tsx's related-emails block: a failure here never
+  // blocks anything else on the page, and just leaves this null (rendered
+  // as an honest "no related emails found" state, never a stale stub).
+  const [relatedEmails, setRelatedEmails] = useState<ApiRelatedEmails | null>(null);
+
+  useEffect(() => {
+    if (!selectedEmailId) {
+      setRelatedEmails(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    getRelatedEmails(selectedEmailId)
+      .then((data) => {
+        if (!cancelled) setRelatedEmails(data);
+      })
+      .catch(() => {
+        if (!cancelled) setRelatedEmails(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedEmailId]);
+
   const uniqueCaseIds = useMemo(
-    () => Array.from(new Set(mockEmails.filter((e) => e.caseId).map((e) => e.caseId))).sort(),
-    []
+    () => Array.from(new Set(availableEmails.filter((e) => e.caseId).map((e) => e.caseId))).sort(),
+    [availableEmails]
   );
 
   const selectedEmail = useMemo(
-    () => mockEmails.find((e) => e.id === selectedEmailId) ?? null,
-    [selectedEmailId]
+    () => availableEmails.find((e) => e.id === selectedEmailId) ?? null,
+    [availableEmails, selectedEmailId]
   );
 
   const filteredEmails = useMemo(() => {
-    let result = mockEmails.filter((email) => {
+    let result = availableEmails.filter((email) => {
       const matchesFilter = filter === 'all' || email.status === filter;
       const matchesCase =
         caseFilter === 'all' ? true :
@@ -112,7 +145,7 @@ export function CasesPage() {
     });
 
     return result;
-  }, [filter, caseFilter, query, sortKey]);
+  }, [availableEmails, filter, caseFilter, query, sortKey]);
 
   // Row click only selects for the inline preview — no navigation.
   const handleSelect = (email: ScannedEmail) => {
@@ -247,7 +280,12 @@ export function CasesPage() {
           <Card className="sticky top-6 p-5 min-h-[420px] flex flex-col">
             {selectedEmail ? (
               <div key={selectedEmail.id} className="animate-fade-in">
-                <CasePreview email={selectedEmail} onOpenCase={() => handleOpenCase(selectedEmail)} />
+                <CasePreview
+                  email={selectedEmail}
+                  allEmails={availableEmails}
+                  relatedEmails={relatedEmails}
+                  onOpenCase={() => handleOpenCase(selectedEmail)}
+                />
               </div>
             ) : (
               <div className="h-full flex-1 flex flex-col items-center justify-center text-center px-4">
@@ -329,9 +367,19 @@ function CaseRow({
   );
 }
 
-function CasePreview({ email, onOpenCase }: { email: ScannedEmail; onOpenCase: () => void }) {
+function CasePreview({
+  email,
+  allEmails,
+  relatedEmails,
+  onOpenCase,
+}: {
+  email: ScannedEmail;
+  allEmails: ScannedEmail[];
+  relatedEmails: ApiRelatedEmails | null;
+  onOpenCase: () => void;
+}) {
   const Icon = statusIcon[email.status];
-  const relatedCount = getRelatedEmailCount(email);
+  const relatedCount = getRelatedEmailCount(email, allEmails);
   const recommendedAction = getRecommendedAction(email);
 
   return (
@@ -386,24 +434,35 @@ function CasePreview({ email, onOpenCase }: { email: ScannedEmail; onOpenCase: (
       {recommendedAction && (
         <div className="panel-2 p-3 mb-4">
           <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-1">Recommended Action</div>
-          <div className="text-[11px] text-ink-300 leading-relaxed whitespace-pre-line line-clamp-4">{recommendedAction}</div>
+          <div className="text-[11px] font-semibold text-ink-200 leading-relaxed">{recommendedAction.action}</div>
+          <div className="text-[11px] text-ink-400 leading-relaxed mt-1 line-clamp-3">{recommendedAction.reason}</div>
         </div>
       )}
 
-      {/* Forward-compatible campaign correlation — nothing here is fabricated;
-          the mock dataset has no cross-email correlation model yet, so every
-          field below is explicitly UNAVAILABLE until the backend provides it. */}
+      {/* Real campaign correlation (backend already built), wired here the
+          same way InfrastructurePage.tsx does — every field is either a
+          real value from the API response or an honest UNAVAILABLE, never
+          a hardcoded stub. */}
       <div className="panel-2 p-3 mb-4">
-        <div className="flex items-center gap-1.5 mb-2">
-          <Radar className="w-3 h-3 text-sky-400" />
-          <span className="text-[9px] font-semibold uppercase tracking-wider text-ink-500">Likely Related Campaign</span>
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-1.5">
+            <Radar className="w-3 h-3 text-sky-400" />
+            <span className="text-[9px] font-semibold uppercase tracking-wider text-ink-500">Likely Related Campaign</span>
+          </div>
+          {relatedEmails?.campaignId && (
+            <Badge variant="neutral">{Math.round(relatedEmails.confidence * 100)}%</Badge>
+          )}
         </div>
-        <div className="space-y-1.5">
-          <CampaignField label="Campaign ID" />
-          <CampaignField label="Shared Indicators" />
-          <CampaignField label="Shared Infrastructure" />
-          <CampaignField label="Correlation Confidence" />
-        </div>
+        {relatedEmails && relatedEmails.relatedEmailIds.length > 0 ? (
+          <div className="space-y-1.5">
+            <CampaignField label="Campaign ID" value={relatedEmails.campaignId} />
+            <CampaignField label="Related Emails" value={String(relatedEmails.relatedEmailIds.length)} />
+            <CampaignField label="Shared Indicators" value={String(relatedEmails.sharedIndicators.length)} />
+            <CampaignField label="Shared Infrastructure" value={String(relatedEmails.sharedInfrastructure.length)} />
+          </div>
+        ) : (
+          <div className="text-[10px] text-ink-600 text-center py-3">No related emails or campaign correlation found</div>
+        )}
       </div>
 
       <Divider className="mb-4" />
@@ -418,13 +477,18 @@ function CasePreview({ email, onOpenCase }: { email: ScannedEmail; onOpenCase: (
   );
 }
 
-function CampaignField({ label }: { label: string }) {
+function CampaignField({ label, value }: { label: string; value: string | null }) {
+  const isUnavailable = value === null || value === '';
   return (
     <div className="flex items-center justify-between">
       <span className="text-[10px] text-ink-600">{label}</span>
-      <span className="text-[10px] text-ink-600 italic flex items-center gap-1">
-        <ShieldQuestion className="w-2.5 h-2.5" /> UNAVAILABLE
-      </span>
+      {isUnavailable ? (
+        <span className="text-[10px] text-ink-600 italic flex items-center gap-1">
+          <ShieldQuestion className="w-2.5 h-2.5" /> UNAVAILABLE
+        </span>
+      ) : (
+        <span className="mono text-[10px] text-ink-300">{value}</span>
+      )}
     </div>
   );
 }

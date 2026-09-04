@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Bell, ShieldAlert, ScanLine, Brain, Radar, CheckCheck } from 'lucide-react';
 import { useActiveCase } from '@/context/ActiveCaseContext';
-import type { ScannedEmail } from '@/data/mockData';
+import type { ScannedEmail } from '@/types/email';
 import { cn } from '@/lib/utils';
 
 type NotificationKind =

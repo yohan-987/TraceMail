@@ -4,3 +4,5 @@ dist/
 data/emails/*.json
 !data/emails/.gitkeep
 data/emails/
+
+backend-batch3.5/backend/data/gmail-cursor.json

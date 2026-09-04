@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { ArrowLeft, Inbox } from 'lucide-react';
 import { CaseSelector } from '@/components/CaseSelector';
 import { InvestigationNavigation, type InvestigationSection } from '@/components/InvestigationNavigation';
-import type { ScannedEmail } from '@/data/mockData';
+import type { ScannedEmail } from '@/types/email';
 import { cn } from '@/lib/utils';
 
 interface InvestigationShellProps {

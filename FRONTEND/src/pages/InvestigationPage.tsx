@@ -14,7 +14,7 @@ import { useActiveCase } from '@/context/ActiveCaseContext';
 import { CaseSelector } from '@/components/CaseSelector';
 import { InvestigationWorkspace } from '@/components/InvestigationWorkspace';
 import { InvestigationNavigation } from '@/components/InvestigationNavigation';
-import type { ScannedEmail } from '@/data/mockData';
+import type { ScannedEmail } from '@/types/email';
 import { cn } from '@/lib/utils';
 
 export function InvestigationPage() {

@@ -21,7 +21,7 @@ import { cn } from '@/lib/utils';
 // --- NEW API IMPORTS ---
 import { scanEmail, getEmail } from '@/api/api';
 import { mapApiEmailToUiEmail } from '@/api/emailMapper';
-import { type ScannedEmail } from '@/data/mockData';
+import { type ScannedEmail } from '@/types/email';
 
 type ScannerPhase = 'idle' | 'scanning' | 'result';
 

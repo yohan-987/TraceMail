@@ -9,7 +9,7 @@ import {
   CircleHelp,
   X,
 } from 'lucide-react';
-import { type ScannedEmail, type EmailStatus } from '@/data/mockData';
+import { type ScannedEmail, type EmailStatus } from '@/types/email';
 import { cn } from '@/lib/utils';
 
 const statusIcon: Record<EmailStatus, typeof AlertTriangle> = {

@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { Card, SectionLabel, Badge } from '@/components/ui/Primitives';
 import { EmailPreview } from '@/components/InvestigationWorkspace';
-import { type EmailStatus, type ScannedEmail } from '@/data/mockData';
+import { type EmailStatus, type ScannedEmail } from '@/types/email';
 import { useActiveCase } from '@/context/ActiveCaseContext';
 import { cn } from '@/lib/utils';
 import { getEmails } from '@/api/api';

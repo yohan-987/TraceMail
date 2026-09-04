@@ -15,7 +15,7 @@ import {
 import { Card, SectionLabel, Badge, Divider } from '@/components/ui/Primitives';
 import { EmailTable } from '@/components/EmailTable';
 import { useActiveCase } from '@/context/ActiveCaseContext';
-import type { EmailStatus, ScannedEmail } from '@/data/mockData';
+import type { EmailStatus, ScannedEmail } from '@/types/email';
 import { cn } from '@/lib/utils';
 
 export const statusIcon: Record<EmailStatus, typeof ShieldCheck> = {

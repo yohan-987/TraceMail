@@ -17,7 +17,7 @@ import { useActiveCase } from '@/context/ActiveCaseContext';
 import { InvestigationShell } from '@/components/InvestigationShell';
 import { InvestigationWorkspace, PreviewField, PreviewInvestigateButton } from '@/components/InvestigationWorkspace';
 import { ProvenanceTag, provenanceMeta, type Provenance } from '@/components/ProvenanceTag';
-import { type ScannedEmail } from '@/data/mockData';
+import { type ScannedEmail } from '@/types/email';
 import { getEmailReport, type ApiForensicReport } from '@/api/api';
 import { cn } from '@/lib/utils';
 

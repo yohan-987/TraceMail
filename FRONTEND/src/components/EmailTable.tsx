@@ -11,7 +11,7 @@ import {
   FolderKanban,
 } from 'lucide-react';
 import { SectionLabel, Badge } from '@/components/ui/Primitives';
-import { type ScannedEmail, type EmailStatus } from '@/data/mockData';
+import { type ScannedEmail, type EmailStatus } from '@/types/email';
 import { useActiveCase } from '@/context/ActiveCaseContext';
 import { cn } from '@/lib/utils';
 

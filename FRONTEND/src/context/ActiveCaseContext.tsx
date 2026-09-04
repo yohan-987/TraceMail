@@ -7,7 +7,7 @@ import {
   useEffect,
   type ReactNode,
 } from 'react';
-import { type ScannedEmail } from '@/data/mockData';
+import { type ScannedEmail } from '@/types/email';
 import { getEmails } from '@/api/api';
 import { mapApiEmailToUiEmail } from '@/api/emailMapper';
 

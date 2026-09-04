@@ -1,5 +1,5 @@
 import type { ApiEmailSummary, ApiEmailDetail } from './api';
-import type { ScannedEmail, EmailStatus } from '@/data/mockData';
+import type { ScannedEmail, EmailStatus } from '@/types/email';
 
 // Accepts EITHER shape GET /api/v1/emails can return:
 //  - ApiEmailSummary: the flat lightweight list-row projection from

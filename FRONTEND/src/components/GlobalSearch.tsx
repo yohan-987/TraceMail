@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Search, X, Loader2 } from 'lucide-react';
 import { getEmails } from '@/api/api';
 import { mapApiEmailToUiEmail } from '@/api/emailMapper';
-import type { ScannedEmail } from '@/data/mockData';
+import type { ScannedEmail } from '@/types/email';
 import { cn } from '@/lib/utils';
 
 /**
