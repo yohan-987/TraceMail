@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
-import { Flag, Search, Filter, Globe, Link2, Hash, Mail, Server, X, ShieldQuestion } from 'lucide-react';
+import { Flag, Search, Filter, Globe, Link2, Hash, Mail, Server, X, ShieldQuestion, AlertTriangle } from 'lucide-react';
 import { Card, SectionLabel, Badge, Divider } from '@/components/ui/Primitives';
 import { useActiveCase } from '@/context/ActiveCaseContext';
 import { InvestigationShell } from '@/components/InvestigationShell';
@@ -76,6 +76,12 @@ const severityRank: Record<ThreatIndicator['reputation'], number> = {
 interface DetailField {
   label: string;
   value: string | null;
+  /** Frontend F3 (Batch 2) — flags a present, risk-elevating value (e.g. a
+   *  domain registered under 60 days ago) with the same amber warning
+   *  treatment this page already uses for 'suspicious' reputation. Only
+   *  applies when value is non-null — an UNAVAILABLE value is neutral,
+   *  never a warning, since absence of data isn't itself a risk signal. */
+  variant?: 'warning';
 }
 
 function mapDetailedApiToIndicators(apiData: any): ThreatIndicator[] {
@@ -106,6 +112,34 @@ function mapDetailedApiToIndicators(apiData: any): ThreatIndicator[] {
   return indicators;
 }
 
+/**
+ * Frontend F3 (Batch 2) — domainAgeDays is null whenever WHOIS returned
+ * nothing (including a privacy/proxy-redacted registration, which hides
+ * the creation date on exactly the newly-registered domains this signal
+ * exists to catch). Per the platform's own evidence-availability rule,
+ * null must render as a distinct UNAVAILABLE state — never as "0 days"
+ * or silently omitted, since either would misrepresent a domain that
+ * was never actually checked as one that's provably not new.
+ */
+function domainAgeField(domainAgeDays: number | null): DetailField {
+  if (domainAgeDays === null) {
+    return { label: 'Domain Age', value: null };
+  }
+  const friendly =
+    domainAgeDays >= 365
+      ? `~${Math.floor(domainAgeDays / 365)} year${Math.floor(domainAgeDays / 365) === 1 ? '' : 's'} ago`
+      : `~${domainAgeDays} day${domainAgeDays === 1 ? '' : 's'} ago`;
+  return {
+    label: 'Domain Age',
+    value: `Registered ${friendly}`,
+    // Under 60 days matches this same signal's own risk threshold
+    // (see riskEngine.ts / the platform doc's WHOIS section) — flagged
+    // with the same amber warning treatment as other risk-elevating
+    // fields on this page, not a bespoke color introduced just for this.
+    variant: domainAgeDays < 60 ? 'warning' : undefined,
+  };
+}
+
 function getIocDetailFields(ioc: ThreatIndicator, emailData: any): DetailField[] {
   if (ioc.type === 'IP') {
     const ipIntel = emailData?.infrastructure?.ipIntelligence?.find((g: any) => g.ip === ioc.value) || {};
@@ -133,6 +167,7 @@ function getIocDetailFields(ioc: ThreatIndicator, emailData: any): DetailField[]
       { label: 'DNS Information', value: null },
       { label: 'MX Information', value: domainIntel.mxHosts?.join(', ') || null },
       { label: 'Domain Intelligence', value: domainIntel.registrar || null },
+      domainAgeField(domainIntel.domainAgeDays ?? null),
       { label: 'Evidence Source', value: ioc.source },
     ];
   }
@@ -458,12 +493,17 @@ function IocDetailDrawer({ ioc, emailData, onClose }: { ioc: ThreatIndicator; em
 
 function DetailFieldRow({ field }: { field: DetailField }) {
   const isUnavailable = field.value === null || field.value === '';
+  const isWarning = !isUnavailable && field.variant === 'warning';
   return (
     <div className="panel-2 p-3">
       <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-1">{field.label}</div>
       {isUnavailable ? (
         <div className="flex items-center gap-1.5 text-[11px] text-ink-600 italic">
           <ShieldQuestion className="w-3 h-3 shrink-0" /> UNAVAILABLE
+        </div>
+      ) : isWarning ? (
+        <div className="mono text-[12px] text-amber-400 break-all flex items-center gap-1.5">
+          <AlertTriangle className="w-3 h-3 shrink-0" /> {field.value}
         </div>
       ) : (
         <div className="mono text-[12px] text-ink-200 break-all">{field.value}</div>

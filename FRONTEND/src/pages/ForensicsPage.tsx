@@ -9,6 +9,7 @@ import {
   CheckCircle,
   XCircle,
   AlertCircle,
+  AlertTriangle,
   Paperclip,
   Info,
   Flag,
@@ -24,6 +25,7 @@ import {
   AuthChip,
   PreviewInvestigateButton,
 } from '@/components/InvestigationWorkspace';
+import { ProvenanceTag } from '@/components/ProvenanceTag';
 import { cn } from '@/lib/utils';
 import { getEmail as fetchEmailDetails } from '@/api/api';
 
@@ -50,6 +52,24 @@ interface BackendEmailDetail {
   headerAnalysis?: {
     anomalies?: Array<{ message: string }>;
     receivedChain?: Array<{ hop: number; fromHostname?: string; fromIp?: string; fromIpClassification?: string; byHostname?: string; timestampIso?: string; timestampRaw?: string; rawHeader?: string }>;
+    // Frontend F3 — Backend Batch 3 (earliest reliable sending node) has
+    // not merged yet. These field names and this nesting under
+    // headerAnalysis are our best assumption, taken directly from the
+    // platform reference doc's §6.3 (claimedOrigin/earliestReliableOrigin/
+    // relayHops/routingAnomalies/confidence, with basis one of
+    // "earliest_reliable_public_hop" | "no_reliable_public_hop_found").
+    // All optional, so nothing here breaks before Batch 3 lands — but
+    // verify this exact shape (especially the nesting and the `basis`
+    // string values) against the real response once it does; don't
+    // assume it from this comment alone.
+    earliestOrigin?: {
+      claimedOrigin: string | null;
+      earliestReliableOrigin: string | null;
+      basis: 'earliest_reliable_public_hop' | 'no_reliable_public_hop_found' | string;
+      relayHops?: Array<{ hop: number; fromIp?: string | null }>;
+      routingAnomalies?: string[];
+      confidence?: number | null;
+    };
   };
   authentication?: {
     spf?: { result: string };
@@ -82,6 +102,12 @@ export interface MappedForensicEmail {
   senderAnomalies: string[];
   headers: Array<{ name: string; value: string }> | Record<string, string>;
   receivedChain: Array<any>;
+  // Frontend F3 — null/empty until Backend Batch 3 lands (see the
+  // headerAnalysis.earliestOrigin comment on BackendEmailDetail above).
+  claimedOrigin: string | null;
+  earliestReliableOrigin: string | null;
+  originBasis: string | null;
+  routingAnomalies: string[];
   attachments: Array<any>;
   evidenceSha256: string;
   indicators: any[];
@@ -178,6 +204,10 @@ function mapDetailedApiToScannedEmail(apiData: BackendEmailDetail): MappedForens
     
     headers: apiData.parsedEmail?.headers?.raw || apiData.parsedEmail?.headers?.normalized || {},
     receivedChain: mappedChain,
+    claimedOrigin: apiData.headerAnalysis?.earliestOrigin?.claimedOrigin ?? null,
+    earliestReliableOrigin: apiData.headerAnalysis?.earliestOrigin?.earliestReliableOrigin ?? null,
+    originBasis: apiData.headerAnalysis?.earliestOrigin?.basis ?? null,
+    routingAnomalies: apiData.headerAnalysis?.earliestOrigin?.routingAnomalies ?? [],
     attachments: apiData.parsedEmail?.attachments || [],
     evidenceSha256: apiData.evidence?.sha256 || 'N/A',
     
@@ -282,7 +312,15 @@ export function ForensicsPage() {
           {activeTab === 'headers' && <HeadersView headers={activeEmail.headers} />}
           {activeTab === 'sender' && <SenderView email={activeEmail} />}
           {activeTab === 'auth' && <AuthView email={activeEmail} />}
-          {activeTab === 'chain' && <ChainView chain={activeEmail.receivedChain} />}
+          {activeTab === 'chain' && (
+            <ChainView
+              chain={activeEmail.receivedChain}
+              claimedOrigin={activeEmail.claimedOrigin}
+              earliestReliableOrigin={activeEmail.earliestReliableOrigin}
+              originBasis={activeEmail.originBasis}
+              routingAnomalies={activeEmail.routingAnomalies}
+            />
+          )}
           {activeTab === 'attachments' && <AttachmentsView email={activeEmail} />}
           {activeTab === 'flagged' && <WhyFlaggedView email={activeEmail} />}
         </div>
@@ -410,7 +448,41 @@ function AuthView({ email }: { email: MappedForensicEmail }) {
   );
 }
 
-function ChainView({ chain }: { chain: any[] }) {
+/**
+ * Frontend F3 — turns the raw `basis` value into a plain-text reason,
+ * never an error state. "No reliable public hop found" is a real,
+ * honest outcome (the whole chain may be private-IP-only, or absent),
+ * not a failure of this feature.
+ */
+function originBasisLabel(basis: string | null): string {
+  if (basis === 'no_reliable_public_hop_found') {
+    return 'No reliable public hop found in the Received chain';
+  }
+  if (basis === 'earliest_reliable_public_hop') {
+    // Shouldn't normally reach here with a null earliestReliableOrigin,
+    // but keep this readable rather than silent if it ever does.
+    return 'Earliest reliable public hop';
+  }
+  return 'Unknown';
+}
+
+function ChainView({
+  chain,
+  claimedOrigin,
+  earliestReliableOrigin,
+  originBasis,
+  routingAnomalies,
+}: {
+  chain: any[];
+  claimedOrigin: string | null;
+  earliestReliableOrigin: string | null;
+  originBasis: string | null;
+  routingAnomalies: string[];
+}) {
+  // Only render this block once there's an actual chain to reason about —
+  // an origin claim with zero hops isn't a finding, it's a missing input.
+  const hasOriginData = chain && chain.length > 0 && (claimedOrigin || earliestReliableOrigin || originBasis);
+
   return (
     <Card className="p-5">
       <div className="flex items-center justify-between mb-5">
@@ -422,6 +494,36 @@ function ChainView({ chain }: { chain: any[] }) {
           <span className="flex items-center gap-1"><Eye className="w-2.5 h-2.5 text-ink-500" /> Observed (from headers)</span>
         </div>
       </div>
+
+      {hasOriginData && (
+        <div className="panel-2 p-4 mb-5">
+          <div className="flex items-center justify-between mb-3">
+            <SectionLabel>Sending Origin</SectionLabel>
+            <ProvenanceTag type="deterministic" />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <PreviewField label="Claimed Origin" value={claimedOrigin || 'Unknown'} mono />
+            <PreviewField
+              label="Candidate Origin — earliest reliable public hop"
+              value={earliestReliableOrigin || originBasisLabel(originBasis)}
+              mono={!!earliestReliableOrigin}
+            />
+          </div>
+          {routingAnomalies.length > 0 && (
+            <div className="mt-3 pt-3 border-t border-base-500/15">
+              <span className="section-label block mb-1.5">Routing Anomalies</span>
+              <ul className="space-y-1">
+                {routingAnomalies.map((anomaly, i) => (
+                  <li key={i} className="flex items-start gap-1.5 text-[11px] text-amber-400 leading-relaxed">
+                    <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" /> {anomaly}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+
       {chain && chain.length > 0 ? (
         <div className="space-y-0">
           {chain.map((hop, i) => (
