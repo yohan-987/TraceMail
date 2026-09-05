@@ -3,6 +3,7 @@ import type {
   HeaderAnalysis,
   HeaderAnomaly,
   ReceivedHop,
+  EarliestOriginResult,
   AuthenticationAnalysis,
   AuthResult,
   EvidenceStatus,
@@ -297,6 +298,55 @@ export interface HeaderForensicsResult {
   authentication: AuthenticationAnalysis;
 }
 
+// --- Earliest reliable sending node ----------------------------------------
+
+export function findEarliestReliableOrigin(
+  receivedChain: ReceivedHop[]
+): EarliestOriginResult {
+  const claimedOrigin =
+    receivedChain.find((h) => h.hop === 1)?.fromIp ?? null;
+
+  const routingAnomalies: string[] = [];
+  const oldestToNewest = [...receivedChain].sort((a, b) => b.hop - a.hop);
+
+  let earliestReliableOrigin: string | null = null;
+  let hopIndexOfOrigin: number | null = null;
+  let foundPublic = false;
+  let wentPrivateAfterPublic = false;
+
+  for (const hop of oldestToNewest) {
+    if (hop.fromIpClassification === "PUBLIC") {
+      if (!foundPublic) {
+        earliestReliableOrigin = hop.fromIp;
+        hopIndexOfOrigin = hop.hop;
+        foundPublic = true;
+      } else if (wentPrivateAfterPublic) {
+        // A public hop reappeared AFTER the chain had already gone
+        // private — this is the real anomaly: normal mail goes
+        // public -> ... -> private (ending at the destination's own
+        // internal relay) and stays private. Public reappearing after
+        // a private hop suggests a spliced/forged Received header.
+        routingAnomalies.push(
+          `Public hop reappeared after private hop at hop ${hop.hop}`
+        );
+      }
+    } else if (hop.fromIpClassification === "PRIVATE" && foundPublic) {
+      wentPrivateAfterPublic = true;
+    }
+  }
+
+  return {
+    claimedOrigin,
+    earliestReliableOrigin,
+    hopIndexOfOrigin,
+    relayHops: receivedChain,
+    routingAnomalies,
+    basis: foundPublic
+      ? "earliest_reliable_public_hop"
+      : "no_reliable_public_hop_found",
+  };
+}
+
 export function analyzeHeaders(parsed: ParsedEmail): HeaderForensicsResult {
   const authentication = parseAuthentication(parsed);
 
@@ -318,12 +368,14 @@ export function analyzeHeaders(parsed: ParsedEmail): HeaderForensicsResult {
     status = "SUSPICIOUS";
   }
 
+  const earliestOrigin = findEarliestReliableOrigin(receivedChain);
+
   const headerAnalysis: HeaderAnalysis = {
     emailId: parsed.emailId,
     anomalies,
     receivedChain,
+    earliestOrigin,
     status,
   };
-
   return { headerAnalysis, authentication };
 }

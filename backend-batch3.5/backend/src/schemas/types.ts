@@ -120,11 +120,26 @@ export interface ReceivedHop {
   rawHeader: string;
 }
 
+// Batch 3: identifies the earliest reliable PUBLIC hop in the Received
+// chain, distinct from the (unverified) claimed origin the message's own
+// headers assert. Never call this "attacker location" anywhere — an
+// attacker who controls their own outbound server can insert fake
+// Received headers before it ever reaches genuinely public infrastructure.
+export interface EarliestOriginResult {
+  claimedOrigin: string | null;
+  earliestReliableOrigin: string | null;
+  hopIndexOfOrigin: number | null;
+  relayHops: ReceivedHop[];
+  routingAnomalies: string[];
+  basis: "earliest_reliable_public_hop" | "no_reliable_public_hop_found";
+}
+
 // Batch 2 fills in real values; Batch 0 only established the shape.
 export interface HeaderAnalysis {
   emailId: string;
   anomalies: HeaderAnomaly[];
   receivedChain: ReceivedHop[];
+  earliestOrigin: EarliestOriginResult;
   status: EvidenceStatus;
 }
 
