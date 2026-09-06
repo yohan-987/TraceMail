@@ -84,6 +84,29 @@ interface DetailField {
   variant?: 'warning';
 }
 
+function reputationForIoc(type: IocType, value: string, apiData: any): ThreatIndicator['reputation'] {
+  if (type === 'IP') {
+    const intel = apiData?.infrastructure?.ipIntelligence?.find((g: any) => g.ip === value);
+    if (!intel || intel.status !== 'AVAILABLE') return 'unknown';
+    return 'clean';
+  }
+
+  if (type === 'Domain') {
+    const intel = apiData?.infrastructure?.domainIntelligence?.find((d: any) => d.domain === value);
+    if (!intel || intel.status !== 'AVAILABLE') return 'unknown';
+    if (intel.domainAgeDays !== null && intel.domainAgeDays < 60) return 'suspicious';
+    return 'clean';
+  }
+
+  if (type === 'URL') {
+    const urlEntry = apiData?.urlAnalysis?.urls?.find((u: any) => u.url === value);
+    if (!urlEntry) return 'unknown';
+    return urlEntry.riskNotes && urlEntry.riskNotes.length > 0 ? 'suspicious' : 'clean';
+  }
+
+  return 'unknown';
+}
+
 function mapDetailedApiToIndicators(apiData: any): ThreatIndicator[] {
   const indicators: ThreatIndicator[] = [];
   const iocs = apiData.iocs || {};
@@ -94,7 +117,7 @@ function mapDetailedApiToIndicators(apiData: any): ThreatIndicator[] {
         id: `${type}-${index}-${value}`,
         type,
         value,
-        reputation: 'unknown',
+                reputation: reputationForIoc(type, value, apiData),
         source,
         firstSeen: apiData.evidence?.createdAt || 'Unknown',
         lastSeen: apiData.evidence?.createdAt || 'Unknown',
