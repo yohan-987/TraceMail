@@ -8,6 +8,7 @@ import {
   ListChecks,
   ShieldQuestion,
   FlaskConical,
+  Fingerprint,
 } from 'lucide-react';
 import { ThreatRing } from '@/components/ThreatRing';
 import { Card, SectionLabel, Badge, Divider } from '@/components/ui/Primitives';
@@ -57,6 +58,37 @@ function normalizeAvailability(
     default:
       return 'Unavailable';
   }
+}
+
+/** Frontend F4 — SNAKE_CASE archetype value to Title Case for display,
+ *  e.g. "ANONYMIZED_INFRASTRUCTURE" -> "Anonymized Infrastructure". */
+function archetypeLabel(value: string): string {
+  return value
+    .toLowerCase()
+    .split('_')
+    .map((word) => (word ? word.charAt(0).toUpperCase() + word.slice(1) : word))
+    .join(' ');
+}
+
+/** Frontend F4 — reuses this project's existing Badge variants only
+ *  (see statusColor in CasesPage.tsx / badgeStyles in Primitives.tsx for
+ *  the same palette) rather than inventing new colors. INCONCLUSIVE is
+ *  explicitly 'neutral', not a failure color — it's a legitimate,
+ *  honest answer when evidence is thin, and must never read as worse
+ *  than the other four archetypes. */
+function archetypeVariant(value: string): 'neutral' | 'warning' | 'danger' | 'critical' {
+  switch (value) {
+    case 'DIRECT_MALICIOUS_INFRASTRUCTURE':
+      return 'critical';
+    case 'SPOOFED_DOMAIN':
+      return 'danger';
+    case 'COMPROMISED_ACCOUNT':
+    case 'ANONYMIZED_INFRASTRUCTURE':
+      return 'warning';
+    case 'INCONCLUSIVE':
+    default:
+      return 'neutral';
+  }
 }
 
 function statusColor(status: AvailabilityStatus): string {
@@ -283,6 +315,22 @@ function AIInvestigationDetail({
     threatScore !== null ? 'AVAILABLE' : risk.status ?? 'UNAVAILABLE'
   );
 
+  // Frontend F4 correction — Backend Batch 4 has landed. The real field
+  // is `archetype`, a sibling of `recommendations` on the email detail
+  // response (see routes/emails.ts: `{ ...toPublicEmailRecord(record),
+  // recommendations, archetype }`) — NOT `archetypeAssessment`, which
+  // was this file's original unverified guess. The object itself is
+  // { archetype: AttackArchetype, basis: string[], confidence } — note
+  // the inner field is also named `archetype`, which is why the local
+  // variable below is named `archetypeResult` rather than shadowing it.
+  const archetypeResult = emailData.archetype ?? {};
+  const archetype: string | null = archetypeResult.archetype ?? null;
+  const archetypeBasis: string[] = Array.isArray(archetypeResult.basis)
+    ? archetypeResult.basis
+    : [];
+  const archetypeConfidence: string | null =
+    archetypeResult.confidence ?? null;
+
   const mlAssessment =
     emailData.mlAssessment ?? {};
 
@@ -499,6 +547,45 @@ function AIInvestigationDetail({
                     mono
                   />
                 </div>
+
+                {archetype && (
+                  <div className="mt-4 pt-4 border-t border-base-500/15">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Fingerprint className="w-3.5 h-3.5 text-accent-500" />
+                      <SectionLabel>Attack Archetype</SectionLabel>
+                      <ProvenanceTag type="deterministic" />
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-wrap mb-1.5">
+                      <Badge variant={archetypeVariant(archetype)}>
+                        Likely Archetype: {archetypeLabel(archetype)}
+                      </Badge>
+                      {archetypeConfidence && (
+                        <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-500">
+                          Confidence: {archetypeConfidence}
+                        </span>
+                      )}
+                    </div>
+
+                    <p className="text-[11px] text-ink-600 italic mb-2">
+                      Evidence-based assessment, not confirmed attacker identity.
+                    </p>
+
+                    {archetypeBasis.length > 0 && (
+                      <ul className="space-y-1.5">
+                        {archetypeBasis.map((item, index) => (
+                          <li
+                            key={index}
+                            className="flex items-start gap-2 text-[12px] text-ink-300 leading-relaxed"
+                          >
+                            <span className="mono text-[10px] text-accent-600 mt-0.5 shrink-0">&bull;</span>
+                            <span>{item}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
 
                 {categoryScores && (
                   <div className="grid grid-cols-5 gap-2">
