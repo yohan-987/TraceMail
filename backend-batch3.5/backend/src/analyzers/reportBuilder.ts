@@ -5,6 +5,7 @@ import type {
   RelatedEmailsResponse,
 } from "../schemas/types";
 import { generateRecommendations } from "./recommendations";
+import { assessArchetype, type ArchetypeAssessment } from "./archetypeAssessment";
 
 // Batch 6 — print-friendly, structured forensic report for one stored
 // email. Pure projection: reuses stored EmailRecord data (plus a fresh,
@@ -165,6 +166,10 @@ export interface ForensicReportContent {
   whyFlagged: ReportWhyFlaggedItem[];
   recommendedActions: Recommendation[];
   relatedCampaign: ReportRelatedCampaign;
+  /** Batch 4 — evidence-based archetype guess. Null only when risk or
+   *  authentication data was never computed for this record (e.g. a
+   *  record that failed before those stages ran) — never a forced guess. */
+  attackArchetype: ArchetypeAssessment | null;
   limitations: string[];
 }
 
@@ -190,6 +195,20 @@ export function buildForensicReport(
   const ai = record.aiAssessment;
 
   const recommendedActions = generateRecommendations(record, relatedEmails);
+
+  // Batch 4 — pure recombination of already-computed evidence, same as
+  // recommendedActions above. null only when risk/authentication were
+  // never computed for this record at all.
+  const attackArchetype: ArchetypeAssessment | null =
+    risk?.categoryScores && record.authentication
+      ? assessArchetype({
+          authentication: record.authentication,
+          urlDomainCategory: risk.categoryScores.urlDomain,
+          contentCategory: risk.categoryScores.content,
+          infrastructureCategory: risk.categoryScores.infrastructure,
+          earliestOrigin: record.headerAnalysis?.earliestOrigin ?? null,
+        })
+      : null;
 
   return {
     emailId: record.emailId,
@@ -392,6 +411,12 @@ export function buildForensicReport(
           available: false,
         },
 
-    limitations: [GEOLOCATION_LIMITATION, THREAT_SCORE_LIMITATION],
+    attackArchetype,
+
+    limitations: [
+      GEOLOCATION_LIMITATION,
+      THREAT_SCORE_LIMITATION,
+      "Attack archetype is an evidence-based assessment, not confirmed attacker identity.",
+    ],
   };
 }

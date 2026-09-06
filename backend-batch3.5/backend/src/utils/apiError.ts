@@ -42,6 +42,11 @@ export const Errors = {
     new ApiError("INVALID_EMAIL_ID", "emailId must be a non-empty alphanumeric/hyphen string.", 400),
   invalidFileType: () =>
     new ApiError("INVALID_FILE_TYPE", "Only .eml files are accepted.", 400),
+  // Batch 5 — access control.
+  unauthorized: () =>
+    new ApiError("UNAUTHORIZED", "Authentication required.", 401),
+  invalidCredentials: () =>
+    new ApiError("INVALID_CREDENTIALS", "Invalid username or password.", 401),
   // A stored record that fails to parse (corrupted/truncated JSON on
   // disk) is a server-side storage problem, not something the client
   // did wrong — never echo the raw parse error (which could reference

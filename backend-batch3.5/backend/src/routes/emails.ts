@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from "express";
+import { requireAuth } from "../middleware/requireAuth";
 import { uploadEml } from "../utils/upload";
 import { assertSafeFilename } from "../utils/filename";
 import { Errors } from "../utils/apiError";
@@ -6,6 +7,7 @@ import { buildInfrastructureGraph } from "../analyzers/infrastructureGraph";
 import { correlateEmail } from "../analyzers/correlation";
 import { generateRecommendations } from "../analyzers/recommendations";
 import { buildForensicReport } from "../analyzers/reportBuilder";
+import { assessArchetype } from "../analyzers/archetypeAssessment";
 import { ingestEmailBuffer } from "../services/emailIngestPipeline";
 import {
   getEmailRecord,
@@ -17,6 +19,8 @@ import { applyEmailListQuery, parseEmailListQuery } from "../services/emailQuery
 import type { ScanAcceptedResponse } from "../schemas/types";
 
 export const emailsRouter = Router();
+
+emailsRouter.use(requireAuth);
 
 // Batch 7 hardening: validate the :emailId route param once, for every
 // route that declares it, instead of letting each handler pass the raw
@@ -113,9 +117,24 @@ emailsRouter.get(
       const allRecords = await listAllEmailRecords();
       const relatedEmails = correlateEmail(record, allRecords);
       const recommendations = generateRecommendations(record, relatedEmails);
+      // Batch 4 — same live-computation pattern as recommendations above:
+      // pure recombination of already-stored risk/authentication/header
+      // data, never persisted as a second dataset, never re-runs ML/LLM/
+      // GeoIP/DNS.
+      const archetype =
+        record.risk?.categoryScores && record.authentication
+          ? assessArchetype({
+              authentication: record.authentication,
+              urlDomainCategory: record.risk.categoryScores.urlDomain,
+              contentCategory: record.risk.categoryScores.content,
+              infrastructureCategory: record.risk.categoryScores.infrastructure,
+              earliestOrigin: record.headerAnalysis?.earliestOrigin ?? null,
+            })
+          : null;
       return res.status(200).json({
         ...toPublicEmailRecord(record),
         recommendations,
+        archetype,
       });
     } catch (err) {
       return next(err);

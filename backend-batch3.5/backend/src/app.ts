@@ -1,9 +1,11 @@
 import express, { NextFunction, Request, Response } from "express";
 import cors from "cors";
 import multer from "multer";
+import session from "express-session";
 import { healthRouter } from "./routes/health";
 import { emailsRouter } from "./routes/emails";
 import { gmailRouter } from "./routes/gmail";
+import { authRouter } from "./routes/auth";
 import { ApiError } from "./utils/apiError";
 import type { ApiErrorBody } from "./schemas/types";
 
@@ -32,6 +34,24 @@ export function createApp() {
   app.use(originList.length > 0 ? cors({ origin: originList }) : cors());
   app.use(express.json({ limit: "1mb" })); // JSON bodies only; .eml uploads go through multer
 
+  // Batch 5: single-analyst session. Memory store is fine at hackathon
+  // scope — no Redis, no multi-instance concerns. Must be registered
+  // before authRouter/emailsRouter/gmailRouter, since requireAuth (used
+  // by the latter two) reads req.session.
+  app.use(
+    session({
+      secret: process.env.SESSION_SECRET ?? "sih26106-dev-secret-change-me",
+      resave: false,
+      saveUninitialized: false,
+      cookie: {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: process.env.NODE_ENV === "production",
+      },
+    })
+  );
+
+  app.use("/api/v1", authRouter);
   app.use("/api/v1", healthRouter);
   app.use("/api/v1", emailsRouter);
   app.use("/api/v1", gmailRouter);
