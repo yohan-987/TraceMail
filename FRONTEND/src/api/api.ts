@@ -119,7 +119,7 @@ export async function getEmails(
   const queryString = query.toString();
   const url = `/api/v1/emails${queryString ? `?${queryString}` : ""}`;
 
-  const response = await fetch(url);
+  const response = await fetch(url, { credentials: "include" });
 
   if (!response.ok) {
     throw new Error(`Failed to load emails: ${response.status}`);
@@ -141,7 +141,8 @@ export async function getEmail(emailId: string) {
   }
 
   const response = await fetch(
-    `/api/v1/emails/${encodeURIComponent(emailId)}`
+    `/api/v1/emails/${encodeURIComponent(emailId)}`,
+    { credentials: "include" }
   );
 
   if (!response.ok) {
@@ -282,7 +283,9 @@ export async function getRelatedEmails(emailId: string): Promise<ApiRelatedEmail
     );
   }
 
-  const response = await fetch(`/api/v1/emails/${encodeURIComponent(emailId)}/related`);
+  const response = await fetch(`/api/v1/emails/${encodeURIComponent(emailId)}/related`, {
+    credentials: "include",
+  });
 
   if (!response.ok) {
     throw new Error(`Failed to load related emails: ${response.status}`);
@@ -298,7 +301,9 @@ export async function getEmailReport(emailId: string): Promise<ApiForensicReport
     );
   }
 
-  const response = await fetch(`/api/v1/emails/${encodeURIComponent(emailId)}/report`);
+  const response = await fetch(`/api/v1/emails/${encodeURIComponent(emailId)}/report`, {
+    credentials: "include",
+  });
 
   if (!response.ok) {
     throw new Error(`Failed to load report: ${response.status}`);
@@ -314,6 +319,7 @@ export async function scanEmail(file: File) {
   const response = await fetch("/api/v1/emails/scan", {
     method: "POST",
     body: formData,
+    credentials: "include",
   });
 
   if (!response.ok) {
@@ -337,7 +343,7 @@ export interface ApiGmailStatus {
 }
 
 export async function getGmailStatus(): Promise<ApiGmailStatus> {
-  const response = await fetch("/api/v1/gmail/status");
+  const response = await fetch("/api/v1/gmail/status", { credentials: "include" });
 
   if (!response.ok) {
     throw new Error(`Failed to load Gmail status: ${response.status}`);
@@ -393,7 +399,9 @@ export async function getEmailGraph(emailId: string): Promise<ApiInfrastructureG
     );
   }
 
-  const response = await fetch(`/api/v1/emails/${encodeURIComponent(emailId)}/graph`);
+  const response = await fetch(`/api/v1/emails/${encodeURIComponent(emailId)}/graph`, {
+    credentials: "include",
+  });
 
   if (!response.ok) {
     throw new Error(`Failed to load infrastructure graph: ${response.status}`);
@@ -406,4 +414,67 @@ export async function getEmailGraph(emailId: string): Promise<ApiInfrastructureG
   // rather than its envelope.
   const data = await response.json();
   return data.graph;
+}
+
+// Frontend F5 — Backend Batch 5's session-cookie auth is now live and
+// already enforced: emailsRouter and gmailRouter both call
+// requireAuth(), so every fetch above needed credentials: "include"
+// added (done above) or those calls would 401 with no cookie ever
+// sent/received. Real contract, confirmed directly from
+// routes/auth.ts and middleware/requireAuth.ts — not a guess:
+//   POST /api/v1/auth/login  { username, password } -> 200
+//     { authenticated: true, username } on success, or a thrown
+//     ApiError (non-2xx) on bad credentials — the exact status code
+//     isn't hardcoded here; login() below treats any non-ok response
+//     as failure, which is correct regardless of whether that's 401
+//     or something else.
+//   POST /api/v1/auth/logout -> always 200
+//     { authenticated: false, username: null }
+//   GET  /api/v1/auth/me -> always 200 (never 401), body reflects the
+//     actual session state: { authenticated, username }
+export interface ApiAuthStatus {
+  authenticated: boolean;
+  username: string | null;
+}
+
+export async function getAuthStatus(): Promise<ApiAuthStatus> {
+  const response = await fetch("/api/v1/auth/me", { credentials: "include" });
+
+  if (!response.ok) {
+    // /auth/me is documented to always return 200 — a non-ok response
+    // here means something is actually broken (network, wrong base
+    // URL, etc.), not "not logged in". Treat it as unauthenticated
+    // rather than throwing, since a transient failure here must never
+    // crash app boot — AuthProvider's mount effect just falls back to
+    // the logged-out state and the login page handles it from there.
+    return { authenticated: false, username: null };
+  }
+
+  return response.json();
+}
+
+export async function login(username: string, password: string): Promise<ApiAuthStatus> {
+  const response = await fetch("/api/v1/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ username, password }),
+  });
+
+  if (!response.ok) {
+    throw new Error("Invalid username or password.");
+  }
+
+  return response.json();
+}
+
+export async function logout(): Promise<void> {
+  const response = await fetch("/api/v1/auth/logout", {
+    method: "POST",
+    credentials: "include",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Logout failed: ${response.status}`);
+  }
 }
