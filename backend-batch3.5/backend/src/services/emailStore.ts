@@ -2,6 +2,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { Errors } from "../utils/apiError";
 import type { EmailAddress, EmailRecord, EmailSummary } from "../schemas/types";
+import { assessConsistency, applyConsistencyOverride } from "../analyzers/evidenceConsistency";
 
 // Layout (Batch 1 spec section 5):
 //   data/emails/<emailId>/original.eml   — exact uploaded bytes, never modified
@@ -64,13 +65,27 @@ function analysisStatusFrom(record: EmailRecord): string | null {
   return record.headerAnalysis?.status ?? null;
 }
 
-/** Project a stored EmailRecord into a table row. Does not re-analyze. */
+/** Project a stored EmailRecord into a table row. Does not re-analyze
+ *  in the sense of ML/LLM/GeoIP/DNS — but DOES apply the same evidence-
+ *  consistency override routes/emails.ts's GET /emails/:emailId applies,
+ *  via applyConsistencyOverride, so list rows never show a different
+ *  classification/level than the detail view for the same email. */
 export function toEmailSummary(record: EmailRecord): EmailSummary {
   const from = record.parsedEmail?.from?.[0];
   const to = record.parsedEmail?.to?.[0];
   const senderDomain = from?.domain ?? null;
   const threatScore = record.risk?.score ?? null;
-  const riskLevel = record.risk?.level ?? null;
+
+  const consistency = record.risk
+    ? assessConsistency({
+        risk: record.risk,
+        authentication: record.authentication ?? null,
+        aiAssessment: record.aiAssessment ?? null,
+        urlDomainCategory: record.risk.categoryScores?.urlDomain ?? null,
+      })
+    : null;
+  const { classification, level: riskLevel } = applyConsistencyOverride(record.risk, consistency);
+
   return {
     emailId: record.emailId,
     caseId: record.caseId,
@@ -80,7 +95,7 @@ export function toEmailSummary(record: EmailRecord): EmailSummary {
     recipient: formatAddress(to),
     subject: record.parsedEmail?.subject ?? null,
     threatScore,
-    classification: record.risk?.classification ?? null,
+    classification,
     status: riskLevel,
     riskLevel,
     date: record.parsedEmail?.date ?? record.evidence.createdAt,
@@ -129,21 +144,19 @@ export async function getEmailRecord(emailId: string): Promise<EmailRecord | nul
 }
 
 async function readSummary(emailId: string): Promise<EmailSummary | null> {
-  try {
-    const raw = await fs.readFile(summaryJsonPath(emailId), "utf-8");
-    try {
-      return JSON.parse(raw) as EmailSummary;
-    } catch {
-      throw Errors.recordUnreadable(emailId);
-    }
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      const record = await getEmailRecord(emailId);
-      if (!record) return null;
-      return toEmailSummary(record);
-    }
-    throw err;
-  }
+  // Always derive live from the full record — never trust the cached
+  // summary.json file written by saveEmailRecord(). That file is
+  // written once, at ingestion time, before any live-computed override
+  // (e.g. the evidence-consistency engine) has run — trusting it here
+  // was the exact root cause of list rows showing a stale risk level
+  // after AI Investigation's detail view was already showing the
+  // corrected one. toEmailSummary is a cheap, pure projection (no I/O,
+  // no re-running ML/LLM/GeoIP/DNS) — there's no meaningful cost to
+  // always recomputing it from parsed.json instead of reading a copy
+  // that can drift out of sync with it.
+  const record = await getEmailRecord(emailId);
+  if (!record) return null;
+  return toEmailSummary(record);
 }
 
 export async function listEmailSummaries(): Promise<EmailSummary[]> {
