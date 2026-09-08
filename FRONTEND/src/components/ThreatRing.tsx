@@ -89,7 +89,22 @@ export function ThreatRing({
       ? (displayProgress / 100) * circumference
       : (displayScore / 100) * circumference;
 
-  const isThreat = mode === 'result' && displayScore >= 60;
+  // Color/glow are driven by riskLevel (the same low/moderate/high/
+  // critical band the rest of the app reads for classification text and
+  // badges), NOT by re-deriving from the raw score here. A raw score can
+  // be legitimately low (e.g. 8) while the level was deliberately raised
+  // by the evidence-consistency engine (see evidenceConsistency.ts /
+  // routes/emails.ts's levelOverride) when AI content analysis strongly
+  // disagrees with an otherwise-clean deterministic fusion score. Tying
+  // color to score alone previously rendered a green "safe-looking" ring
+  // next to a "SUSPICIOUS" label for exactly that case.
+  const normalizedLevel = (riskLevel ?? '').toLowerCase();
+  // .includes(), not exact equality — this prop's own default value is
+  // the display-style string 'HIGH RISK' (not the raw "high" enum), so
+  // an exact match would silently treat that default as non-threat.
+  const isThreat =
+    mode === 'result' &&
+    (normalizedLevel.includes('moderate') || normalizedLevel.includes('high') || normalizedLevel.includes('critical'));
 
   return (
     <div
