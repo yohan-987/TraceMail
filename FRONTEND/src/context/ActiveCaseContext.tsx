@@ -5,6 +5,7 @@ import {
   useMemo,
   useCallback,
   useEffect,
+  useRef,
   type ReactNode,
 } from 'react';
 import { type ScannedEmail } from '@/types/email';
@@ -36,6 +37,17 @@ interface ActiveCaseContextValue {
 
 const ActiveCaseContext = createContext<ActiveCaseContextValue | null>(null);
 
+// Real-time-without-refresh: matches the reduced Gmail backend poll
+// cadence (GMAIL_POLL_INTERVAL_SECONDS). This is a plain interval poll,
+// not a push mechanism (WebSockets/SSE) — consistent with this
+// project's own established tradeoff elsewhere (Gmail polling itself,
+// GmailStatusIndicator.tsx) of "near-real-time at a fraction of the
+// setup cost" rather than new realtime infrastructure. A GET /emails
+// call against a flat-file store with a handful of records is cheap
+// enough that 10s is safe to leave running indefinitely, not just for
+// a short test session.
+const POLL_INTERVAL_MS = 4_000;
+
 export function ActiveCaseProvider({ children }: { children: ReactNode }) {
   const [lastViewedEmailId, setLastViewedEmailId] = useState<string | null>(
     null
@@ -43,24 +55,42 @@ export function ActiveCaseProvider({ children }: { children: ReactNode }) {
 
   const [availableEmails, setAvailableEmails] = useState<ScannedEmail[]>([]);
 
+  // In-flight guard — same principle as gmailClient.ts's backend poll
+  // loop: if a refresh is still awaiting the network when the next
+  // interval tick fires (a slow connection, a large list), skip that
+  // tick rather than firing an overlapping request. Never resets
+  // availableEmails to anything if a request fails; only a successful
+  // response ever calls setAvailableEmails.
+  const isRefreshingRef = useRef(false);
+
+  const refreshEmails = useCallback(async () => {
+    if (isRefreshingRef.current) return;
+    isRefreshingRef.current = true;
+    try {
+      const response = await getEmails({ limit: 200, sort: 'date' });
+      const mappedData = response.items.map(mapApiEmailToUiEmail);
+      setAvailableEmails(mappedData);
+    } catch (err) {
+      console.error('Failed to refresh email list:', err);
+    } finally {
+      isRefreshingRef.current = false;
+    }
+  }, []);
+
   useEffect(() => {
-    let cancelled = false;
+    // Immediate fetch on mount, then repeat on POLL_INTERVAL_MS — this
+    // is what makes a newly-arrived Gmail-sourced email (or a fresh
+    // .eml upload from elsewhere) show up without the user refreshing
+    // the page. refreshEmails's own in-flight guard means a slow tick
+    // is skipped rather than stacking concurrent requests.
+    refreshEmails();
 
-    getEmails({ limit: 200, sort: 'date' })
-      .then((response) => {
-        if (cancelled) return;
-
-        const mappedData = response.items.map(mapApiEmailToUiEmail);
-        setAvailableEmails(mappedData);
-      })
-      .catch((err) => {
-        console.error('Failed to load email list:', err);
-      });
+    const interval = setInterval(refreshEmails, POLL_INTERVAL_MS);
 
     return () => {
-      cancelled = true;
+      clearInterval(interval);
     };
-  }, []);
+  }, [refreshEmails]);
 
   const getEmail = useCallback(
     (id: string | null): ScannedEmail | null => {
@@ -81,16 +111,6 @@ export function ActiveCaseProvider({ children }: { children: ReactNode }) {
     () => getEmail(lastViewedEmailId),
     [lastViewedEmailId, getEmail]
   );
-
-  const refreshEmails = useCallback(async () => {
-    try {
-      const response = await getEmails({ limit: 200, sort: 'date' });
-      const mappedData = response.items.map(mapApiEmailToUiEmail);
-      setAvailableEmails(mappedData);
-    } catch (err) {
-      console.error('Failed to refresh email list:', err);
-    }
-  }, []);
 
   const value = useMemo<ActiveCaseContextValue>(
     () => ({

@@ -220,6 +220,33 @@ export async function pollInbox(): Promise<number> {
 }
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let pollInFlight = false;
+
+/**
+ * Wraps pollInbox() with an in-flight guard so the interval below never
+ * starts an overlapping poll cycle. At the original 45s default this
+ * could never actually happen — a single poll cycle (a history.list
+ * call, maybe a messages.get or two) finishes in well under a second.
+ * Once the interval is pushed down toward single-digit seconds, though,
+ * a slow network round-trip could still be pending when the next tick
+ * fires; two concurrent polls racing to read-modify-write the same
+ * gmail-cursor.json is exactly the kind of thing that fails rarely and
+ * confusingly. pollInbox() itself is untouched and still directly
+ * callable (e.g. from tests) — this guard only wraps calls made via
+ * the polling loop.
+ */
+async function pollInboxGuarded(): Promise<void> {
+  if (pollInFlight) {
+    console.log("[gmail] previous poll still in flight, skipping this tick");
+    return;
+  }
+  pollInFlight = true;
+  try {
+    await pollInbox();
+  } finally {
+    pollInFlight = false;
+  }
+}
 
 /**
  * Starts the Gmail polling loop if credentials are configured. Safe to
@@ -240,9 +267,9 @@ export function startGmailPolling(): void {
 
   // Fire once immediately so a configured inbox doesn't wait a full
   // interval for its first poll, then continue on the interval.
-  void pollInbox();
+  void pollInboxGuarded();
   pollTimer = setInterval(() => {
-    void pollInbox();
+    void pollInboxGuarded();
   }, intervalMs);
 }
 
