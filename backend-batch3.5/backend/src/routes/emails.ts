@@ -1,3 +1,5 @@
+import { assessConsistency, applyConsistencyOverride } from "../analyzers/evidenceConsistency";
+
 import { Router, Request, Response, NextFunction } from "express";
 import { requireAuth } from "../middleware/requireAuth";
 import { uploadEml } from "../utils/upload";
@@ -121,7 +123,7 @@ emailsRouter.get(
       // pure recombination of already-stored risk/authentication/header
       // data, never persisted as a second dataset, never re-runs ML/LLM/
       // GeoIP/DNS.
-      const archetype =
+          const archetype =
         record.risk?.categoryScores && record.authentication
           ? assessArchetype({
               authentication: record.authentication,
@@ -131,10 +133,39 @@ emailsRouter.get(
               earliestOrigin: record.headerAnalysis?.earliestOrigin ?? null,
             })
           : null;
+
+          const consistency = record.risk
+        ? assessConsistency({
+            risk: record.risk,
+            authentication: record.authentication ?? null,
+            aiAssessment: record.aiAssessment ?? null,
+            urlDomainCategory: record.risk.categoryScores?.urlDomain ?? null,
+          })
+        : null;
+
+      // If the consistency engine determined the existing fused
+      // classification undersells the actual risk (see
+      // evidenceConsistency.ts's TECHNICAL_CLEAN_CONTENT_ALARMING case),
+      // raise it here — classification may therefore differ from what
+      // risk fusion alone would have produced. This is intentional: it
+      // does not change record.risk.score or categoryScores, only the
+      // classification/level returned to the client.
+      //
+      // applyConsistencyOverride is shared with emailStore.ts's
+      // toEmailSummary — do not reintroduce a second, inline copy of
+      // this rank-guard logic here; that duplication is exactly what
+      // caused list rows to show a stale level after this override was
+      // first added only to this route.
+      const { classification, level } = applyConsistencyOverride(record.risk, consistency);
+
+      const publicRecord = toPublicEmailRecord(record);
+
       return res.status(200).json({
-        ...toPublicEmailRecord(record),
+        ...publicRecord,
+        risk: record.risk ? { ...record.risk, classification, level } : record.risk,
         recommendations,
         archetype,
+        consistency,
       });
     } catch (err) {
       return next(err);
