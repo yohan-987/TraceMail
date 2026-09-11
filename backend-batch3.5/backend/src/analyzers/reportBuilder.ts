@@ -6,6 +6,7 @@ import type {
 } from "../schemas/types";
 import { generateRecommendations } from "./recommendations";
 import { assessArchetype, type ArchetypeAssessment } from "./archetypeAssessment";
+import { RETENTION_POLICY } from "../config/retentionPolicy";
 
 // Batch 6 — print-friendly, structured forensic report for one stored
 // email. Pure projection: reuses stored EmailRecord data (plus a fresh,
@@ -170,6 +171,11 @@ export interface ForensicReportContent {
    *  authentication data was never computed for this record (e.g. a
    *  record that failed before those stages ran) — never a forced guess. */
   attackArchetype: ArchetypeAssessment | null;
+  /** Batch 7 — one explicit compliance reference line (platform doc §8),
+   *  with the current retention description interpolated in from
+   *  Batch 6's config/retentionPolicy.ts rather than duplicated here as
+   *  a second copy of the same text. */
+  complianceNote: string;
   limitations: string[];
 }
 
@@ -412,6 +418,10 @@ export function buildForensicReport(
         },
 
     attackArchetype,
+
+    complianceNote:
+      "This report and its underlying evidence are handled in alignment with the Information Technology Act, 2000 and the Digital Personal Data Protection Act, 2023. " +
+      `Retention: ${RETENTION_POLICY.description} (config/retentionPolicy.ts).`,
 
     limitations: [
       GEOLOCATION_LIMITATION,

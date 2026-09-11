@@ -6,6 +6,7 @@ import { healthRouter } from "./routes/health";
 import { emailsRouter } from "./routes/emails";
 import { gmailRouter } from "./routes/gmail";
 import { authRouter } from "./routes/auth";
+import { complianceRouter } from "./routes/compliance";
 import { ApiError } from "./utils/apiError";
 import type { ApiErrorBody } from "./schemas/types";
 
@@ -55,6 +56,7 @@ export function createApp() {
   app.use("/api/v1", healthRouter);
   app.use("/api/v1", emailsRouter);
   app.use("/api/v1", gmailRouter);
+  app.use("/api/v1", complianceRouter);
 
   app.get("/", (_req, res) => {
     res.status(200).json({ service: "sih26106-backend", ok: true });

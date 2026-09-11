@@ -11,6 +11,7 @@ import { generateRecommendations } from "../analyzers/recommendations";
 import { buildForensicReport } from "../analyzers/reportBuilder";
 import { assessArchetype } from "../analyzers/archetypeAssessment";
 import { ingestEmailBuffer } from "../services/emailIngestPipeline";
+import { recordAccess, getAccessLog } from "../services/accessLog";
 import {
   getEmailRecord,
   listEmailSummaries,
@@ -116,6 +117,15 @@ emailsRouter.get(
     try {
       const record = await getEmailRecord(req.params.emailId);
       if (!record) throw Errors.emailNotFound(req.params.emailId);
+
+      // Batch 6 — requireAuth (applied to this whole router) guarantees
+      // req.session.authenticated is true here, which the login route
+      // only ever sets alongside req.session.username in the same
+      // request — so username should always be present. The "unknown"
+      // fallback is defensive only, per the task's own note to accept a
+      // fallback string; it should never actually trigger in practice.
+      recordAccess(req.params.emailId, req.session?.username ?? "unknown");
+
       const allRecords = await listAllEmailRecords();
       const relatedEmails = correlateEmail(record, allRecords);
       const recommendations = generateRecommendations(record, relatedEmails);
@@ -205,6 +215,22 @@ emailsRouter.get(
       if (!record) throw Errors.emailNotFound(req.params.emailId);
       const allRecords = await listAllEmailRecords();
       return res.status(200).json(correlateEmail(record, allRecords));
+    } catch (err) {
+      return next(err);
+    }
+  }
+);
+
+// GET /api/v1/emails/:emailId/access-log — Batch 6: who viewed this
+// email's detail view, and when. Populated by recordAccess() being
+// called from the GET /:emailId handler above, on every view.
+emailsRouter.get(
+  "/emails/:emailId/access-log",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const record = await getEmailRecord(req.params.emailId);
+      if (!record) throw Errors.emailNotFound(req.params.emailId);
+      return res.status(200).json(await getAccessLog(req.params.emailId));
     } catch (err) {
       return next(err);
     }
