@@ -1,16 +1,37 @@
+import { createHash } from "crypto";
 import { fitTfidf, transformTfidf, type TfidfModel } from "./tfidf";
 import { fitLogisticRegression, predictProba, type LogisticRegressionModel } from "./logisticRegression";
+import { deriveStructuredFeatures } from "./datasetFeatures";
 import type { LabeledEmail } from "./dataset";
 
 export const MODEL_NAME = "tfidf-logistic-v1";
-export const MODEL_VERSION = "1.0";
+/**
+ * 2.0 (ML upgrade): structured-feature leakage fix (see dataset.ts /
+ * datasetFeatures.ts) + unigram+bigram TF-IDF, both benchmarked against
+ * the 1.0 baseline before being adopted — see docs/ml/AUDIT.md. Same
+ * architecture family (TF-IDF + logistic regression); the version bump
+ * reflects the retraining and metadata changes, not a new algorithm.
+ */
+export const MODEL_VERSION = "2.0";
+
+export interface ModelMetadata {
+  trainedAt: string;
+  /** SHA-256 of the exact training-row text+label content used to fit this model. */
+  datasetHash: string;
+  datasetSize: number;
+  splitSeed: number;
+  preprocessingVersion: string;
+  hyperparams: { learningRate: number; epochs: number; l2: number };
+  tokenizer: NonNullable<TfidfModel["tokenizer"]>;
+}
 
 export interface SerializedMlModel {
   model: typeof MODEL_NAME;
-  modelVersion: typeof MODEL_VERSION;
+  modelVersion: string;
   tfidf: TfidfModel;
   logistic: LogisticRegressionModel;
   structuredFeatureCount: number;
+  metadata: ModelMetadata;
 }
 
 export interface MlInput {
@@ -33,6 +54,8 @@ export interface EvaluationMetrics {
   precision: number;
   recall: number;
   f1: number;
+  falsePositiveRate: number;
+  falseNegativeRate: number;
   confusionMatrix: ConfusionMatrix;
   splitSizes: { train: number; validation: number; test: number };
 }
@@ -56,14 +79,22 @@ export function vectorize(input: MlInput, tfidf: TfidfModel): number[] {
   return [...transformTfidf(documentText(input), tfidf), ...structuredFeatures(input)];
 }
 
+/**
+ * ML upgrade — leakage fix: structured features are derived from the row's
+ * own text via the same path used at inference (`analyzeContent()`),
+ * instead of trusting hand-authored per-row numbers. See dataset.ts and
+ * datasetFeatures.ts for why the old numbers were a label proxy, not a
+ * measurement.
+ */
 export function toMlInput(row: LabeledEmail): MlInput {
+  const derived = deriveStructuredFeatures(row.subject, row.body);
   return {
     subject: row.subject,
     body: row.body,
-    urlCount: row.urlCount ?? 0,
-    urgency: row.urgency ?? 0,
-    credentialRequest: row.credentialRequest ?? 0,
-    financialRequest: row.financialRequest ?? 0,
+    urlCount: derived.urlCount,
+    urgency: derived.urgency,
+    credentialRequest: derived.credentialRequest,
+    financialRequest: derived.financialRequest,
   };
 }
 
@@ -126,10 +157,14 @@ export function evaluate(model: SerializedMlModel, rows: LabeledEmail[]): Omit<E
   const precision = tp + fp === 0 ? 0 : tp / (tp + fp);
   const recall = tp + fn === 0 ? 0 : tp / (tp + fn);
   const f1 = precision + recall === 0 ? 0 : (2 * precision * recall) / (precision + recall);
+  const falsePositiveRate = fp + tn === 0 ? 0 : fp / (fp + tn);
+  const falseNegativeRate = fn + tp === 0 ? 0 : fn / (fn + tp);
   return {
     precision,
     recall,
     f1,
+    falsePositiveRate,
+    falseNegativeRate,
     confusionMatrix: {
       truePositive: tp,
       falsePositive: fp,
@@ -139,26 +174,81 @@ export function evaluate(model: SerializedMlModel, rows: LabeledEmail[]): Omit<E
   };
 }
 
-export function trainSerializedModel(data: LabeledEmail[]): {
+export interface TrainOptions {
+  splitSeed?: number;
+  tokenizer?: NonNullable<TfidfModel["tokenizer"]>;
+  maxFeatures?: number;
+  minDf?: number;
+  learningRate?: number;
+  epochs?: number;
+  l2?: number;
+}
+
+const DEFAULT_TRAIN_OPTIONS: Required<TrainOptions> = {
+  splitSeed: 26106,
+  // unigram+bigram is the current default — benchmarked against
+  // unigram-only on the validation split before being adopted; see
+  // docs/ml/AUDIT.md "Baseline improvement". Callers (e.g. the benchmark
+  // script) can still request "unigram" explicitly to reproduce the old
+  // baseline for comparison.
+  tokenizer: "unigram+bigram",
+  maxFeatures: 1200,
+  minDf: 2,
+  learningRate: 0.5,
+  epochs: 400,
+  l2: 0.02,
+};
+
+function hashDataset(rows: LabeledEmail[]): string {
+  const hash = createHash("sha256");
+  for (const row of rows) {
+    hash.update(`${row.subject}\u0000${row.body}\u0000${row.label}\n`);
+  }
+  return hash.digest("hex");
+}
+
+export function trainSerializedModel(
+  data: LabeledEmail[],
+  options?: TrainOptions
+): {
   model: SerializedMlModel;
   metrics: EvaluationMetrics;
   validationMetrics: Omit<EvaluationMetrics, "splitSizes">;
 } {
-  const { train, validation, test } = stratifiedSplit(data);
-  const tfidf = fitTfidf(train.map((r) => documentText(toMlInput(r))));
+  const opts = { ...DEFAULT_TRAIN_OPTIONS, ...options };
+  const { train, validation, test } = stratifiedSplit(data, opts.splitSeed);
+  const tfidf = fitTfidf(
+    train.map((r) => documentText(toMlInput(r))),
+    { maxFeatures: opts.maxFeatures, minDf: opts.minDf, tokenizer: opts.tokenizer }
+  );
   const X = train.map((r) => vectorize(toMlInput(r), tfidf));
   const y = train.map((r) => r.label);
-  const logistic = fitLogisticRegression(X, y, { learningRate: 0.5, epochs: 400, l2: 0.02 });
+  const logistic = fitLogisticRegression(X, y, {
+    learningRate: opts.learningRate,
+    epochs: opts.epochs,
+    l2: opts.l2,
+  });
   const model: SerializedMlModel = {
     model: MODEL_NAME,
     modelVersion: MODEL_VERSION,
     tfidf,
     logistic,
     structuredFeatureCount: STRUCTURED,
+    metadata: {
+      trainedAt: new Date().toISOString(),
+      datasetHash: hashDataset(data),
+      datasetSize: data.length,
+      splitSeed: opts.splitSeed,
+      preprocessingVersion: "content-features-v2",
+      hyperparams: { learningRate: opts.learningRate, epochs: opts.epochs, l2: opts.l2 },
+      tokenizer: opts.tokenizer,
+    },
   };
 
-  // Validation is used only for reporting — hyperparameters are fixed,
-  // so the test split is not used to pick a model.
+  // Validation is used only for reporting and for choosing between
+  // pre-registered configurations (see benchmark.ts) — hyperparameters
+  // for the shipped model are fixed before this final test evaluation
+  // runs, so the test split is not used to pick a model.
   const testMetrics = evaluate(model, test);
   const validationMetrics = evaluate(model, validation);
 

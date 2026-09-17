@@ -10,9 +10,20 @@ import {
   type MlInput,
   type SerializedMlModel,
 } from "../ml/model";
+import { explainModel, type ModelExplanation } from "../ml/explain";
 
 export interface MlPredictor {
   predict(input: MlInput): { probability: number };
+  /**
+   * Optional: identifies which concrete model produced predictions from
+   * this predictor, plus its global explanation. Added so the ML output
+   * contract reports the model that actually ran — not just the
+   * currently-bundled MODEL_NAME/MODEL_VERSION constants, which would be
+   * wrong if ML_MODEL_PATH points at a different saved model — while
+   * staying optional so existing simple test mocks that only implement
+   * `predict()` keep working unchanged.
+   */
+  describe?(): { model: string; modelVersion: string; explanation: ModelExplanation };
 }
 
 const ML_EVIDENCE_THRESHOLD = 0.6;
@@ -59,9 +70,16 @@ export async function getDefaultPredictor(): Promise<MlPredictor | null> {
   }
   if (!cachedModel) return null;
   const model = cachedModel;
+  // Computed once per loaded model, not per prediction: this is a global
+  // description of what the model learned (see explain.ts), so it's
+  // wasteful and semantically wrong to recompute it per email.
+  const explanation = explainModel(model, 10);
   return {
     predict(input: MlInput) {
       return { probability: predictPhishingProbability(model, input) };
+    },
+    describe() {
+      return { model: model.model, modelVersion: model.modelVersion, explanation };
     },
   };
 }
@@ -104,12 +122,15 @@ export function assessMl(options: {
 
   try {
     const probability = predictor.predict(input).probability;
+    const described = predictor.describe?.();
+    const modelName = described?.model ?? MODEL_NAME;
+    const modelVersion = described?.modelVersion ?? MODEL_VERSION;
     if (!Number.isFinite(probability) || probability < 0 || probability > 1) {
       return {
         mlAssessment: {
           emailId,
-          model: MODEL_NAME,
-          modelVersion: MODEL_VERSION,
+          model: modelName,
+          modelVersion,
           classification: null,
           probability: null,
           status: "ERROR",
@@ -121,8 +142,8 @@ export function assessMl(options: {
     const classification: MLClassification = probability >= 0.5 ? "phishing" : "legitimate";
     const mlAssessment: MLAssessment = {
       emailId,
-      model: MODEL_NAME,
-      modelVersion: MODEL_VERSION,
+      model: modelName,
+      modelVersion,
       classification,
       probability,
       status: "AVAILABLE",
@@ -135,7 +156,15 @@ export function assessMl(options: {
         severity: probability >= 0.85 ? "high" : "medium",
         weight: Math.round(probability * 35),
         message: `TF-IDF logistic classifier scored this message as phishing (uncalibrated score ${probability.toFixed(2)}).`,
-        evidence: { model: MODEL_NAME, modelVersion: MODEL_VERSION, probability },
+        evidence: {
+          model: modelName,
+          modelVersion,
+          probability,
+          // Global model-level explanation (see explain.ts) — not a
+          // per-email explanation of this specific score. null when the
+          // predictor doesn't expose one (e.g. a bare test mock).
+          explanation: described?.explanation ?? null,
+        },
         category: "content",
         provenance: "ML_ASSESSMENT",
       });

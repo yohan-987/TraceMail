@@ -4,26 +4,14 @@ export interface LabeledEmail {
   subject: string;
   body: string;
   label: EmailLabel;
-  urlCount?: number;
-  urgency?: number;
-  credentialRequest?: number;
-  financialRequest?: number;
 }
 
-function phish(
-  subject: string,
-  body: string,
-  extras?: Partial<Omit<LabeledEmail, "subject" | "body" | "label">>
-): LabeledEmail {
-  return { subject, body, label: 1, ...extras };
+function phish(subject: string, body: string): LabeledEmail {
+  return { subject, body, label: 1 };
 }
 
-function ham(
-  subject: string,
-  body: string,
-  extras?: Partial<Omit<LabeledEmail, "subject" | "body" | "label">>
-): LabeledEmail {
-  return { subject, body, label: 0, ...extras };
+function ham(subject: string, body: string): LabeledEmail {
+  return { subject, body, label: 0 };
 }
 
 /**
@@ -31,48 +19,59 @@ function ham(
  * TF-IDF classifier. Examples are original short texts in the style of
  * well-known public spam/phishing patterns (not a dump of a copyrighted
  * mailbox). Split in trainModel.ts with a fixed seed to avoid leakage.
+ *
+ * ML upgrade note (see docs/ml/AUDIT.md, "Finding 1"): rows previously
+ * carried hand-authored urlCount/urgency/credentialRequest/financialRequest
+ * numbers that were a near-perfect proxy for the label (every phishing row
+ * had at least one non-zero, every legitimate row had all-zero), and 23/81
+ * disagreed with what the production feature extractor actually computes
+ * for that text. Those per-row numbers are removed; structured features
+ * are now derived at train time from the text itself via
+ * `deriveStructuredFeatures()` in datasetFeatures.ts, the same function
+ * path (`analyzeContent`) used at inference, so training and inference
+ * compute these fields identically.
  */
 export const LABELED_EMAILS: LabeledEmail[] = [
-  phish("Urgent: verify your account immediately", "Your account has been suspended. Click here to verify your account immediately, or wire the funds to avoid suspension.", { urlCount: 1, urgency: 2, credentialRequest: 1, financialRequest: 1 }),
-  phish("Confirm your identity now", "We noticed unusual sign-in activity. Confirm your identity and enter your password to keep your mailbox open.", { urlCount: 1, urgency: 1, credentialRequest: 2 }),
-  phish("Your PayPal account will be limited", "Please log in to confirm your billing information or we will suspend withdrawals.", { urlCount: 1, credentialRequest: 1, urgency: 1 }),
-  phish("Security alert: unauthorized login", "Click the link and verify your account immediately. Update your username and password today.", { urlCount: 1, urgency: 1, credentialRequest: 2 }),
-  phish("Invoice attached - pay now", "Please process this payment and wire the funds to the account listed. Invoice attached.", { financialRequest: 2, urgency: 1 }),
-  phish("IT Support: mailbox full", "Your mailbox is full. Sign in to confirm storage upgrade or email will bounce.", { credentialRequest: 1, urgency: 1 }),
-  phish("Apple ID locked", "Your Apple ID was locked. Confirm your identity immediately to restore iCloud.", { urgency: 1, credentialRequest: 1 }),
-  phish("Bank: unusual transfer", "We need you to make a payment and confirm your bank account and routing number.", { financialRequest: 2, credentialRequest: 1 }),
-  phish("Gift card request from CEO", "I need you to buy gift cards immediately and send the codes. This is time sensitive.", { urgency: 2, financialRequest: 1 }),
-  phish("Password expiring", "Your password expires tonight. Log in to confirm a new password or access is revoked.", { urgency: 1, credentialRequest: 1 }),
-  phish("Document shared via Dropbox", "A file was shared with you. Click here to download the attachment and view payroll.", { urlCount: 1 }),
-  phish("Refund pending", "Claim your refund. Verify your account and enter card details on the secure page.", { credentialRequest: 1, financialRequest: 1, urlCount: 1 }),
-  phish("HR: update direct deposit", "Update your bank account for payroll. Confirm identity using the form.", { financialRequest: 1, credentialRequest: 1 }),
-  phish("Microsoft 365 suspension", "Unusual activity. Verify now or your Office account is disabled.", { urgency: 1, credentialRequest: 1, urlCount: 1 }),
-  phish("Delivery failed - fees due", "Package held. Pay customs with gift card or wire transfer immediately.", { financialRequest: 2, urgency: 1 }),
-  phish("Shared OneDrive file", "You have a new encrypted voicemail. Open the attachment and enable macros.", { urlCount: 1 }),
-  phish("Reset required", "We reset your password. Sign in to confirm the new credentials at this link.", { credentialRequest: 1, urlCount: 1 }),
-  phish("Account verification needed", "Dear customer, verify your account immediately to avoid permanent closure.", { urgency: 1, credentialRequest: 1 }),
-  phish("Unusual Amazon order", "We placed an order of $799. Cancel by logging in to your account page now.", { credentialRequest: 1, financialRequest: 1, urlCount: 1 }),
-  phish("Tax refund", "You are eligible for a tax refund. Confirm identity and bank account to receive funds.", { financialRequest: 1, credentialRequest: 1 }),
-  phish("VPN access disabled", "IT department: re-enable VPN. Enter username and password on this portal.", { credentialRequest: 1 }),
-  phish("Suspended for spam", "Your mailbox was used to send spam. Click here to restore access immediately.", { urgency: 1, urlCount: 1 }),
-  phish("New voicemail attached", "Please download the attachment to listen. It contains an invoice you must pay.", { financialRequest: 1 }),
-  phish("Wire the remaining balance", "Per our call, wire the funds today to this bank account. Do not delay.", { financialRequest: 2, urgency: 1 }),
-  phish("Confirm mailbox ownership", "Confirm your identity or we delete the mailbox. Act now.", { urgency: 2, credentialRequest: 1 }),
-  phish("Crypto wallet locked", "Verify your wallet seed on this page to unlock withdrawals.", { credentialRequest: 1, financialRequest: 1, urlCount: 1 }),
-  phish("Payroll correction", "We overpaid you. Refund via gift card immediately and reply with codes.", { financialRequest: 1, urgency: 1 }),
-  phish("Security code", "Enter the one-time code and your password on the verification site.", { credentialRequest: 1, urlCount: 1 }),
-  phish("Deactivation notice", "Your online banking will be deactivated. Verify your account to continue.", { credentialRequest: 1, urgency: 1 }),
-  phish("Help desk ticket 8821", "Reset required. Log in to the help desk and confirm identity.", { credentialRequest: 1 }),
-  phish("Limited-time prize", "You won a prize. Click here and provide bank account details to claim.", { financialRequest: 1, urlCount: 1, urgency: 1 }),
-  phish("Failed payment", "Your last payment failed. Update now with card number and password.", { financialRequest: 1, credentialRequest: 1, urgency: 1 }),
-  phish("Shared Google Doc", "A document requires you to sign in to confirm viewing permissions.", { credentialRequest: 1, urlCount: 1 }),
-  phish("Urgent request from finance", "Process this payment before close of business. Routing number is in the thread.", { financialRequest: 1, urgency: 1 }),
-  phish("Mailbox quota exceeded", "You have 24 hours. Click the link and sign in to increase quota.", { urgency: 1, credentialRequest: 1, urlCount: 1 }),
-  phish("Verify device", "We do not recognize this device. Confirm your identity immediately.", { urgency: 1, credentialRequest: 1 }),
-  phish("Netflix billing", "Your membership is on hold. Update now to keep watching.", { financialRequest: 1, urgency: 1, urlCount: 1 }),
-  phish("COVID relief funds", "Claim relief. Confirm identity and bank account on the government look-alike form.", { financialRequest: 1, credentialRequest: 1 }),
-  phish("DocuSign: review contract", "Review and sign. The portal asks for your password to authenticate.", { credentialRequest: 1, urlCount: 1 }),
-  phish("Last warning", "Final notice. Verify your account immediately or it is deleted.", { urgency: 2, credentialRequest: 1 }),
+  phish("Urgent: verify your account immediately", "Your account has been suspended. Click here to verify your account immediately, or wire the funds to avoid suspension."),
+  phish("Confirm your identity now", "We noticed unusual sign-in activity. Confirm your identity and enter your password to keep your mailbox open."),
+  phish("Your PayPal account will be limited", "Please log in to confirm your billing information or we will suspend withdrawals."),
+  phish("Security alert: unauthorized login", "Click the link and verify your account immediately. Update your username and password today."),
+  phish("Invoice attached - pay now", "Please process this payment and wire the funds to the account listed. Invoice attached."),
+  phish("IT Support: mailbox full", "Your mailbox is full. Sign in to confirm storage upgrade or email will bounce."),
+  phish("Apple ID locked", "Your Apple ID was locked. Confirm your identity immediately to restore iCloud."),
+  phish("Bank: unusual transfer", "We need you to make a payment and confirm your bank account and routing number."),
+  phish("Gift card request from CEO", "I need you to buy gift cards immediately and send the codes. This is time sensitive."),
+  phish("Password expiring", "Your password expires tonight. Log in to confirm a new password or access is revoked."),
+  phish("Document shared via Dropbox", "A file was shared with you. Click here to download the attachment and view payroll."),
+  phish("Refund pending", "Claim your refund. Verify your account and enter card details on the secure page."),
+  phish("HR: update direct deposit", "Update your bank account for payroll. Confirm identity using the form."),
+  phish("Microsoft 365 suspension", "Unusual activity. Verify now or your Office account is disabled."),
+  phish("Delivery failed - fees due", "Package held. Pay customs with gift card or wire transfer immediately."),
+  phish("Shared OneDrive file", "You have a new encrypted voicemail. Open the attachment and enable macros."),
+  phish("Reset required", "We reset your password. Sign in to confirm the new credentials at this link."),
+  phish("Account verification needed", "Dear customer, verify your account immediately to avoid permanent closure."),
+  phish("Unusual Amazon order", "We placed an order of $799. Cancel by logging in to your account page now."),
+  phish("Tax refund", "You are eligible for a tax refund. Confirm identity and bank account to receive funds."),
+  phish("VPN access disabled", "IT department: re-enable VPN. Enter username and password on this portal."),
+  phish("Suspended for spam", "Your mailbox was used to send spam. Click here to restore access immediately."),
+  phish("New voicemail attached", "Please download the attachment to listen. It contains an invoice you must pay."),
+  phish("Wire the remaining balance", "Per our call, wire the funds today to this bank account. Do not delay."),
+  phish("Confirm mailbox ownership", "Confirm your identity or we delete the mailbox. Act now."),
+  phish("Crypto wallet locked", "Verify your wallet seed on this page to unlock withdrawals."),
+  phish("Payroll correction", "We overpaid you. Refund via gift card immediately and reply with codes."),
+  phish("Security code", "Enter the one-time code and your password on the verification site."),
+  phish("Deactivation notice", "Your online banking will be deactivated. Verify your account to continue."),
+  phish("Help desk ticket 8821", "Reset required. Log in to the help desk and confirm identity."),
+  phish("Limited-time prize", "You won a prize. Click here and provide bank account details to claim."),
+  phish("Failed payment", "Your last payment failed. Update now with card number and password."),
+  phish("Shared Google Doc", "A document requires you to sign in to confirm viewing permissions."),
+  phish("Urgent request from finance", "Process this payment before close of business. Routing number is in the thread."),
+  phish("Mailbox quota exceeded", "You have 24 hours. Click the link and sign in to increase quota."),
+  phish("Verify device", "We do not recognize this device. Confirm your identity immediately."),
+  phish("Netflix billing", "Your membership is on hold. Update now to keep watching."),
+  phish("COVID relief funds", "Claim relief. Confirm identity and bank account on the government look-alike form."),
+  phish("DocuSign: review contract", "Review and sign. The portal asks for your password to authenticate."),
+  phish("Last warning", "Final notice. Verify your account immediately or it is deleted."),
 
   ham("Weekly digest", "Here is your weekly digest of company news and updates."),
   ham("Test scan", "This is a test body."),

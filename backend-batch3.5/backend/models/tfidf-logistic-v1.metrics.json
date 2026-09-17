@@ -1,9 +1,25 @@
 {
-  "note": "Prototype hold-out metrics. Not production accuracy. Probability is an uncalibrated model score.",
+  "note": "Prototype hold-out metrics on an 81-example hand-authored dataset (40 phishing / 41 legitimate). Test split is 13 examples — treat as illustrative, not production-grade statistical evidence. Probability is an uncalibrated model score, not a real-world probability of attack. See docs/ml/AUDIT.md for the full audit, the leakage fix applied to this version, and the baseline-vs-improved comparison this configuration was chosen from.",
+  "modelVersion": "2.0",
+  "metadata": {
+    "trainedAt": "2026-09-12T13:10:58.653Z",
+    "datasetHash": "a11207a548efc15b9743d8524a69b37f6b4be9864e230286705455d7cfa5eb26",
+    "datasetSize": 81,
+    "splitSeed": 26106,
+    "preprocessingVersion": "content-features-v2",
+    "hyperparams": {
+      "learningRate": 0.5,
+      "epochs": 400,
+      "l2": 0.02
+    },
+    "tokenizer": "unigram+bigram"
+  },
   "test": {
     "precision": 1,
     "recall": 0.8333333333333334,
     "f1": 0.9090909090909091,
+    "falsePositiveRate": 0,
+    "falseNegativeRate": 0.16666666666666666,
     "confusionMatrix": {
       "truePositive": 5,
       "falsePositive": 0,
@@ -20,11 +36,101 @@
     "precision": 1,
     "recall": 0.8333333333333334,
     "f1": 0.9090909090909091,
+    "falsePositiveRate": 0,
+    "falseNegativeRate": 0.16666666666666666,
     "confusionMatrix": {
       "truePositive": 5,
       "falsePositive": 0,
       "trueNegative": 6,
       "falseNegative": 1
     }
+  },
+  "explanation": {
+    "method": "logistic_regression_coefficients",
+    "topPositive": [
+      {
+        "term": "confirm",
+        "weight": 0.616755522640359
+      },
+      {
+        "term": "and",
+        "weight": 0.5633593862622267
+      },
+      {
+        "term": "to",
+        "weight": 0.559417731993239
+      },
+      {
+        "term": "account",
+        "weight": 0.5236328888186939
+      },
+      {
+        "term": "in_to",
+        "weight": 0.45585840922877596
+      },
+      {
+        "term": "mailbox",
+        "weight": 0.4451370955068148
+      },
+      {
+        "term": "now",
+        "weight": 0.42776004335659307
+      },
+      {
+        "term": "bank",
+        "weight": 0.3989706444583542
+      },
+      {
+        "term": "identity",
+        "weight": 0.39771417863024144
+      },
+      {
+        "term": "sign",
+        "weight": 0.38217752454825205
+      }
+    ],
+    "topNegative": [
+      {
+        "term": "is",
+        "weight": -0.6517631181799245
+      },
+      {
+        "term": "the",
+        "weight": -0.556041544992033
+      },
+      {
+        "term": "no",
+        "weight": -0.42525604060622085
+      },
+      {
+        "term": "attached",
+        "weight": -0.4213386609176507
+      },
+      {
+        "term": "at",
+        "weight": -0.3814044320318006
+      },
+      {
+        "term": "for",
+        "weight": -0.35406392931310415
+      },
+      {
+        "term": "lunch",
+        "weight": -0.3537443900659037
+      },
+      {
+        "term": "are",
+        "weight": -0.34825390679844376
+      },
+      {
+        "term": "thursday",
+        "weight": -0.33451409005486255
+      },
+      {
+        "term": "can",
+        "weight": -0.3181080062587984
+      }
+    ],
+    "scope": "global_model_coefficients_not_per_prediction"
   }
 }
