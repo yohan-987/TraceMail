@@ -2,6 +2,7 @@ import { google, gmail_v1 } from "googleapis";
 import { promises as fs } from "fs";
 import path from "path";
 import { ingestEmailBuffer } from "./emailIngestPipeline";
+import { safeErrorSummary } from "../utils/safeErrorSummary";
 
 // Batch 1 — Gmail OAuth + polling ingestion.
 //
@@ -59,6 +60,11 @@ function isConfigured(): boolean {
   );
 }
 
+// safeErrorSummary is imported from ../utils/safeErrorSummary (see
+// import above) — kept as a standalone, dependency-free module rather
+// than defined here so it stays directly unit-testable without a
+// googleapis dependency (Prompt 11, Section 9).
+
 function getOAuthClient() {
   const client = new google.auth.OAuth2(
     process.env.GMAIL_CLIENT_ID,
@@ -83,7 +89,7 @@ async function readCursor(): Promise<GmailCursor> {
     // cursor yet" and let the next successful write repair it, same
     // "one bad thing never breaks the pipeline" convention as the rest
     // of the codebase.
-    console.error("[gmail] cursor file unreadable, starting fresh:", err);
+    console.error("[gmail] cursor file unreadable, starting fresh:", safeErrorSummary(err));
     return { historyId: null };
   }
 }
@@ -173,7 +179,7 @@ export async function pollInbox(): Promise<number> {
       // cycle's messages are skipped rather than replaying the whole
       // mailbox, but polling recovers on its own instead of staying
       // broken until someone notices.
-      console.error("[gmail] history.list failed, resetting cursor:", err);
+      console.error("[gmail] history.list failed, resetting cursor:", safeErrorSummary(err));
       const profile = await gmail.users.getProfile({ userId: "me" });
       await writeCursor({ historyId: profile.data.historyId ?? null });
       status.lastPollAt = new Date().toISOString();
@@ -200,7 +206,7 @@ export async function pollInbox(): Promise<number> {
         // One bad message must not stop the rest of the batch, and
         // must not prevent the cursor from advancing past the ones
         // that did succeed.
-        console.error(`[gmail] failed to ingest message ${messageId}:`, err);
+        console.error(`[gmail] failed to ingest message ${messageId}:`, safeErrorSummary(err));
       }
     }
 
@@ -212,7 +218,7 @@ export async function pollInbox(): Promise<number> {
   } catch (err) {
     // Any other failure (auth rejected, network down, rate limited,
     // etc.) — log server-side and let the next interval retry.
-    console.error("[gmail] poll cycle failed:", err);
+    console.error("[gmail] poll cycle failed:", safeErrorSummary(err));
     status.lastPollAt = new Date().toISOString();
     status.lastPollMessageCount = null;
     return 0;

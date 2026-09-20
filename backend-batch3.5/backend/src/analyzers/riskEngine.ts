@@ -49,13 +49,44 @@ function levelFromScore(score: number): RiskLevel {
 }
 
 /**
- * UNCHANGED from Batch 3 — reads the flat evidence list directly (never
+ * Score ceiling applied to a category when EVERY evidence item in it is
+ * tagged strength: "weak" (see schemas/types.ts and
+ * docs/audit/PHASE1-AUDIT.md, Finding 3). Weak evidence is real and
+ * still worth surfacing, but no volume of purely weak, individually-
+ * innocuous signals (percent-encoded tracking links across many hosts,
+ * ordinary marketing urgency/CTA language, Message-ID/Return-Path
+ * artifacts) should be able to drive a category into "high"/"critical"
+ * territory on repetition alone -- that requires at least one item that
+ * specifically indicates malicious intent (strength: "strong", or an
+ * as-yet-untagged legacy evidence type, which defaults to unrestricted
+ * -- see the strength field's doc comment). A category with even one
+ * strong/untagged item is NOT capped; the ceiling only applies when
+ * NOTHING in the category rises above "weak".
+ */
+const WEAK_ONLY_CATEGORY_CEILING = 40;
+
+/**
+ * UNCHANGED from Batch 3 -- reads the flat evidence list directly (never
  * touched category-result wrapping), so it needed no modification for
  * Batch 3.5. Genuinely no evidence at all is the only case classified
  * as legitimate outright; specific evidence types are checked before
  * falling back to the score band, so an isolated strong signal isn't
  * silently discarded just because its blended contribution alone
  * doesn't clear the low-band threshold.
+ *
+ * Batch 3.5 fix (docs/audit/PHASE1-AUDIT.md, Finding 2): the previous
+ * fallback labeled ANY non-"low" level as "suspicious," even when
+ * every contributing evidence item was individually weak. That let a
+ * pile of purely weak/structural evidence -- e.g. many percent-encoded
+ * tracking links plus ordinary marketing urgency language -- cross into
+ * the "moderate" band and get the same "suspicious" label a message
+ * with a real strong signal would get. The fallback now requires at
+ * least one evidence item that is NOT tagged strength: "weak" before
+ * defaulting away from "legitimate". (Originally implemented as a
+ * hardcoded WEAK_ONLY_TYPES type-string set; superseded by the formal
+ * `strength` field on RiskEvidenceItem in the Finding 3 pass so there
+ * is one source of truth for weak/strong, shared with the category
+ * ceiling in computeCategoryResult below.)
  */
 function classify(evidence: RiskEvidenceItem[], level: RiskLevel): string {
   if (evidence.length === 0) return "legitimate";
@@ -75,7 +106,30 @@ function classify(evidence: RiskEvidenceItem[], level: RiskLevel): string {
   if (has("spf_fail") || has("dkim_fail") || has("dmarc_fail")) {
     return "suspicious_authentication";
   }
-  return level === "low" ? "legitimate" : "suspicious";
+  // Prompt 11 fix (Section 4, canonical status consistency): credential-
+  // request language is tagged strength: "strong" (Finding 3) and is
+  // independently sufficient for archetypeAssessment.ts's
+  // COMPROMISED_ACCOUNT/POSSIBLE tier (Prompt 7) — but before this fix,
+  // classify() had no dedicated branch for it at all (unlike
+  // financial_request_language just above), so it only reached
+  // "suspicious" via the score-band fallback below. A lone content
+  // signal's fixed ~20% category weight, diluted against
+  // always-zero-when-otherwise-clean technical/identity categories,
+  // essentially never crosses the low/moderate boundary on its own —
+  // so a real credential-phishing email with no other anomalies
+  // classified "legitimate" here while archetypeAssessment.ts
+  // simultaneously flagged the SAME evidence as COMPROMISED_ACCOUNT.
+  // That contradiction, not a hypothetical, was confirmed by direct
+  // computation before this fix. This branch does not require score-
+  // band corroboration (matching how phishing/impersonation above are
+  // also evidence-type gated, not score-gated).
+  if (has("credential_request_language")) {
+    return "suspicious";
+  }
+  if (level === "low") return "legitimate";
+
+  const hasNonWeakEvidence = evidence.some((e) => e.strength !== "weak");
+  return hasNonWeakEvidence ? "suspicious" : "legitimate";
 }
 
 /**
@@ -96,7 +150,15 @@ function computeCategoryResult(
   }
 
   const weights = categoryEvidence.map((e) => e.weight);
-  return { score: combineEvidence(weights), status: "AVAILABLE", evidence: categoryEvidence };
+  const combined = combineEvidence(weights);
+
+  // See WEAK_ONLY_CATEGORY_CEILING above: only caps the score when
+  // EVERY item in this category is tagged "weak" — a single strong (or
+  // untagged/legacy) item removes the cap entirely for that category.
+  const allWeak = categoryEvidence.length > 0 && categoryEvidence.every((e) => e.strength === "weak");
+  const score = allWeak ? Math.min(combined, WEAK_ONLY_CATEGORY_CEILING) : combined;
+
+  return { score, status: "AVAILABLE", evidence: categoryEvidence };
 }
 
 const CATEGORY_WEIGHTS: Record<RiskCategory, number> = {

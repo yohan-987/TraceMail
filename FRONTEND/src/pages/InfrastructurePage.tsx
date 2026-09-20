@@ -338,15 +338,13 @@ export function InfrastructurePage() {
               )}
             </div>
             {emailGraph && emailGraph.nodes.length > 0 ? (
-              <>
-                <RelationshipGraphCanvas graph={emailGraph} />
-                <Divider className="my-4" />
-                <div className="grid grid-cols-4 gap-2.5">
-                  {graphLegend.map((item) => (
-                    <LegendItem key={item.type} color={item.swatch} label={item.label} />
-                  ))}
-                </div>
-              </>
+              // The legend that used to sit below the canvas is now
+              // rendered INSIDE RelationshipGraphCanvas as interactive
+              // filter chips (Prompt 10) — same items, same swatches,
+              // now also clickable to dim a node type. Kept as one
+              // legend rather than two to avoid showing the same key
+              // twice with different behavior.
+              <RelationshipGraphCanvas graph={emailGraph} />
             ) : (
               <div className="h-80 flex items-center justify-center text-[12px] text-ink-600">
                 No relationship graph data available
@@ -549,14 +547,23 @@ function LegendItem({ color, label }: { color: string; label: string }) {
 // leaks Cytoscape instances.
 function RelationshipGraphCanvas({ graph }: { graph: ApiInfrastructureGraph }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const cyRef = useRef<cytoscape.Core | null>(null);
   const [selectedNode, setSelectedNode] = useState<ApiInfrastructureGraphNode | null>(null);
+  // Prompt 10: "suspicious-only filtering" + "basic clustering/
+  // collapsing where already supported". Both implemented with
+  // cytoscape's own native show()/hide() — no new library, no change
+  // to the graph data itself, purely a display-layer toggle.
+  const [suspiciousOnly, setSuspiciousOnly] = useState(false);
+  const [hiddenTypes, setHiddenTypes] = useState<Set<ApiInfrastructureGraphNodeType>>(new Set());
+
+  const suspiciousCount = graph.nodes.filter((n) => n.suspicious).length;
 
   useEffect(() => {
     if (!containerRef.current) return;
 
     const elements = [
       ...graph.nodes.map((node) => ({
-        data: { id: node.id, label: node.label, type: node.type },
+        data: { id: node.id, label: node.label, type: node.type, suspicious: node.suspicious ? 'true' : 'false' },
       })),
       ...graph.edges.map((edge, i) => ({
         // Edge ids just need to be unique for Cytoscape — the same
@@ -595,8 +602,23 @@ function RelationshipGraphCanvas({ graph }: { graph: ApiInfrastructureGraph }) {
           },
         })),
         {
+          // Prompt 10 — suspicious nodes get a distinct, consistent
+          // treatment (amber ring) regardless of type, so they stand
+          // out in a dense graph even before the filter is applied.
+          selector: 'node[suspicious = "true"]',
+          style: {
+            'border-width': 2.5,
+            'border-color': '#f59e0b',
+            'border-opacity': 0.9,
+          },
+        },
+        {
           selector: 'node:selected',
           style: { 'border-width': 2, 'border-color': '#ffffff' },
+        },
+        {
+          selector: 'node.graph-dimmed',
+          style: { opacity: 0.12 },
         },
         {
           selector: 'edge',
@@ -616,12 +638,32 @@ function RelationshipGraphCanvas({ graph }: { graph: ApiInfrastructureGraph }) {
             'text-background-padding': '2px',
           },
         },
+        {
+          selector: 'edge.graph-dimmed',
+          style: { opacity: 0.06 },
+        },
       ] as cytoscape.Stylesheet[],
-      layout: { name: 'cose', animate: false, padding: 24 } as cytoscape.LayoutOptions,
+      layout: {
+        name: 'cose',
+        animate: false,
+        padding: 24,
+        // Prompt 10: "improve graph readability for dense
+        // investigations" — tuned for less node/label overlap on
+        // graphs with many nodes, while remaining the same 'cose'
+        // layout (no library change). Higher nodeRepulsion and
+        // idealEdgeLength push nodes further apart; nodeOverlap adds
+        // extra separation specifically to reduce label collisions.
+        nodeRepulsion: 8000,
+        idealEdgeLength: 90,
+        nodeOverlap: 20,
+        gravity: 45,
+      } as cytoscape.LayoutOptions,
       minZoom: 0.3,
       maxZoom: 2.5,
       wheelSensitivity: 0.25,
     });
+
+    cyRef.current = cy;
 
     cy.on('tap', 'node', (evt) => {
       const nodeId = evt.target.id();
@@ -635,15 +677,96 @@ function RelationshipGraphCanvas({ graph }: { graph: ApiInfrastructureGraph }) {
 
     return () => {
       cy.destroy();
+      cyRef.current = null;
     };
   }, [graph]);
 
+  // Prompt 10 filters — re-applied whenever the toggle state or graph
+  // changes, entirely via cytoscape's own class/style API (dim rather
+  // than fully hide non-matching elements, so the graph's overall
+  // shape stays legible as context while the filter is active).
+  useEffect(() => {
+    const cy = cyRef.current;
+    if (!cy) return;
+
+    cy.batch(() => {
+      cy.elements().removeClass('graph-dimmed');
+
+      if (suspiciousOnly) {
+        const keep = cy.nodes('[suspicious = "true"]').closedNeighborhood();
+        cy.elements().not(keep).addClass('graph-dimmed');
+      }
+
+      for (const type of hiddenTypes) {
+        cy.nodes(`[type = "${type}"]`).addClass('graph-dimmed');
+      }
+    });
+  }, [suspiciousOnly, hiddenTypes, graph]);
+
+  function toggleTypeVisibility(type: ApiInfrastructureGraphNodeType) {
+    setHiddenTypes((prev) => {
+      const next = new Set(prev);
+      if (next.has(type)) next.delete(type);
+      else next.add(type);
+      return next;
+    });
+  }
+
   return (
     <div className="grid grid-cols-12 gap-4">
-      <div
-        ref={containerRef}
-        className="col-span-8 h-96 rounded-lg border border-base-500/20 bg-base-950/40"
-      />
+      <div className="col-span-8 space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {graphLegend.map((item) => {
+              const isHidden = hiddenTypes.has(item.type);
+              return (
+                <button
+                  key={item.type}
+                  type="button"
+                  onClick={() => toggleTypeVisibility(item.type)}
+                  title={isHidden ? `Show ${item.label} nodes` : `Hide ${item.label} nodes`}
+                  className={cn(
+                    'flex items-center gap-1.5 px-2 py-1 rounded-md border text-[9px] font-semibold uppercase tracking-wider transition-colors',
+                    isHidden
+                      ? 'border-base-500/15 text-ink-600 opacity-50'
+                      : 'border-base-500/25 text-ink-400 hover:border-base-500/50 hover:text-ink-200'
+                  )}
+                >
+                  <span className={cn('w-2 h-2 rounded-full', item.swatch)} />
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+          <button
+            type="button"
+            onClick={() => setSuspiciousOnly((v) => !v)}
+            disabled={suspiciousCount === 0}
+            title={
+              suspiciousCount === 0
+                ? 'No nodes are flagged suspicious in this graph'
+                : suspiciousOnly
+                  ? 'Show all nodes'
+                  : 'Dim everything except suspicious nodes and their immediate neighbors'
+            }
+            className={cn(
+              'flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[9px] font-bold uppercase tracking-wider transition-colors shrink-0',
+              suspiciousCount === 0
+                ? 'border-base-500/15 text-ink-700 opacity-40 cursor-not-allowed'
+                : suspiciousOnly
+                  ? 'border-amber-600/50 bg-amber-900/20 text-amber-400'
+                  : 'border-base-500/25 text-ink-400 hover:border-amber-600/40 hover:text-amber-400'
+            )}
+          >
+            <span className="w-2 h-2 rounded-full bg-amber-500" />
+            Suspicious only {suspiciousCount > 0 ? `(${suspiciousCount})` : ''}
+          </button>
+        </div>
+        <div
+          ref={containerRef}
+          className="h-96 rounded-lg border border-base-500/20 bg-base-950/40"
+        />
+      </div>
       <div className="col-span-4">
         <div className="panel-2 p-3 h-96 overflow-y-auto scrollbar-thin">
           <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mb-2">
@@ -654,6 +777,12 @@ function RelationshipGraphCanvas({ graph }: { graph: ApiInfrastructureGraph }) {
               <PreviewField label="Type" value={selectedNode.type} />
               <PreviewField label="Label" value={selectedNode.label} mono />
               {selectedNode.status && <PreviewField label="Status" value={selectedNode.status} />}
+              {selectedNode.suspicious && (
+                <div className="flex items-center gap-1.5 text-[10px] font-semibold text-amber-400 uppercase tracking-wider">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                  Flagged suspicious
+                </div>
+              )}
               {selectedNode.metadata && Object.keys(selectedNode.metadata).length > 0 && (
                 <div>
                   <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500 mt-3 mb-1">
@@ -669,7 +798,9 @@ function RelationshipGraphCanvas({ graph }: { graph: ApiInfrastructureGraph }) {
             <p className="text-[11px] text-ink-600 leading-relaxed">
               Click any node for its type, label, and metadata. Nodes represent emails, addresses,
               domains, URLs, IPs, ASNs, organizations, and geolocations derived from this email's
-              stored analysis — edges show how they're connected.
+              stored analysis — edges show how they're connected. Click a legend chip above to dim
+              that node type; use "Suspicious only" to focus on flagged nodes and their immediate
+              neighbors.
             </p>
           )}
         </div>

@@ -49,22 +49,35 @@ const KEYWORDS: Record<string, string[]> = {
 
 const CATEGORY_META: Record<
   keyof typeof KEYWORDS,
-  { type: string; severity: "low" | "medium" | "high"; weight: number; label: string }
+  { type: string; severity: "low" | "medium" | "high"; weight: number; label: string; strength: "weak" | "strong" }
 > = {
-  urgency: { type: "urgency_language", severity: "low", weight: 15, label: "urgency" },
+  // Ordinary urgency/call-to-action copy is common in entirely
+  // legitimate marketing and transactional mail on its own — weak.
+  // Credential/financial requests specifically ask for something a
+  // legitimate bulk sender essentially never asks for by email — strong.
+  // See docs/audit/PHASE1-AUDIT.md, Finding 3.
+  urgency: { type: "urgency_language", severity: "low", weight: 15, label: "urgency", strength: "weak" },
   credential_request: {
     type: "credential_request_language",
     severity: "high",
     weight: 25,
     label: "credential-request",
+    strength: "strong",
   },
   financial_request: {
     type: "financial_request_language",
     severity: "high",
     weight: 25,
     label: "financial-request",
+    strength: "strong",
   },
-  call_to_action: { type: "call_to_action_language", severity: "medium", weight: 15, label: "call-to-action" },
+  call_to_action: {
+    type: "call_to_action_language",
+    severity: "medium",
+    weight: 15,
+    label: "call-to-action",
+    strength: "weak",
+  },
 };
 
 function matchedKeywords(text: string, keywords: string[]): string[] {
@@ -123,6 +136,7 @@ export function analyzeContent(parsed: ParsedEmail): ContentHeuristicsResult {
         evidence: { matchedKeywords: matched },
         category: "content",
         provenance: "DETERMINISTIC_ANALYSIS",
+        strength: meta.strength,
       });
     }
   }

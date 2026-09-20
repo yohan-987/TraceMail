@@ -376,6 +376,9 @@ export interface ApiInfrastructureGraphNode {
   type: ApiInfrastructureGraphNodeType;
   label: string;
   status?: string;
+  /** Prompt 10 — derived display flag for the graph's suspicious-only
+   *  filter. Not a risk score; see backend infrastructureGraph.ts. */
+  suspicious?: boolean;
   metadata?: Record<string, unknown>;
 }
 

@@ -33,17 +33,53 @@ export function mapApiEmailToUiEmail(apiEmail: ApiEmailAny): ScannedEmail {
   const recipient = apiEmail.recipient ?? detailTo?.email ?? '';
   const date = apiEmail.date ?? apiEmail.email?.date ?? '';
 
-  const threatScore = apiEmail.threatScore ?? apiEmail.risk?.score ?? 0;
+  const rawScore = apiEmail.threatScore ?? apiEmail.risk?.score ?? null;
+  const threatScore = rawScore ?? 0;
   const classification = apiEmail.classification ?? apiEmail.risk?.classification ?? 'Unknown';
   const riskLevel = apiEmail.riskLevel ?? apiEmail.risk?.level ?? 'UNKNOWN';
 
-  // Normalize the backend status to exactly match your UI's 4 strict types
-  const rawStatus = (apiEmail.status || riskLevel || '').toLowerCase();
-  let uiStatus: EmailStatus = 'safe';
+  // Derive the UI's 4-value status from the backend's CANONICAL
+  // `classification` field — the fused verdict that Findings 1-4
+  // (docs/audit/PHASE1-AUDIT.md) fixed to correctly distinguish, e.g.,
+  // a "moderate"-scoring email made of only weak evidence (classifies
+  // "legitimate") from one with a real signal (classifies "suspicious")
+  // at the exact same score/level. Mapping off `riskLevel` bands alone
+  // — the previous approach — loses that distinction entirely and, in
+  // the reported regression, didn't even cover the "moderate" band: any
+  // level value other than "critical"/"high" silently fell through to
+  // the default of 'safe', turning a MODERATE/SUSPICIOUS email into a
+  // false "Safe" badge. `riskLevel` is now consulted only as a fallback
+  // for a classification value this mapping doesn't recognize, never as
+  // the primary signal — and a genuinely missing score/classification
+  // (every risk category UNAVAILABLE) is 'inconclusive', not defaulted
+  // to 'safe'.
+  const normalizedClassification = classification.toLowerCase();
+  const normalizedLevel = String(riskLevel).toLowerCase();
 
-  if (rawStatus === 'critical' || rawStatus === 'malicious') uiStatus = 'malicious';
-  else if (rawStatus === 'high' || rawStatus === 'suspicious') uiStatus = 'suspicious';
-  else if (rawStatus === 'inconclusive') uiStatus = 'inconclusive';
+  let uiStatus: EmailStatus;
+  if (rawScore === null || classification === 'Unknown') {
+    uiStatus = 'inconclusive';
+  } else if (normalizedClassification === 'legitimate') {
+    uiStatus = 'safe';
+  } else if (normalizedClassification === 'suspicious') {
+    uiStatus = 'suspicious';
+  } else if (
+    normalizedClassification === 'phishing' ||
+    normalizedClassification === 'impersonation' ||
+    normalizedClassification === 'financial_fraud' ||
+    normalizedClassification === 'suspicious_authentication'
+  ) {
+    uiStatus = 'malicious';
+  } else if (normalizedLevel === 'critical' || normalizedLevel === 'high' || normalizedLevel === 'moderate') {
+    // Unrecognized classification string (e.g. a future backend value
+    // this mapping hasn't been updated for yet) — fall back to the
+    // level band rather than silently defaulting to 'safe'.
+    uiStatus = 'suspicious';
+  } else if (normalizedLevel === 'low') {
+    uiStatus = 'safe';
+  } else {
+    uiStatus = 'inconclusive';
+  }
 
   const authResult = (r?: string): 'pass' | 'fail' | 'none' =>
     r === 'pass' || r === 'fail' ? r : 'none';

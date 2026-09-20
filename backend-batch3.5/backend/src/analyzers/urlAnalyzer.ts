@@ -99,54 +99,84 @@ export interface UrlAnalysisResult {
  * URL. Evidence weights feed the urlDomain risk category; the risk
  * engine combines them (not a flat sum) to avoid overcounting when a
  * single URL trips several correlated notes at once.
+ *
+ * Evidence is grouped by hostname per finding-type (see
+ * docs/audit/PHASE1-AUDIT.md, Finding 1) rather than emitted once per
+ * URL instance. A legitimate bulk/marketing email routinely contains
+ * dozens of unique tracking-parameter URLs to the SAME host — those
+ * survive iocExtractor's exact-string dedupe as "distinct" URLs, and
+ * emitting one weighted evidence item per instance let the risk
+ * engine's noisy-OR combination saturate the urlDomain category to
+ * 100 from nothing but repeated instances of one weak structural
+ * observation. One evidence item per (finding-type, hostname) keeps
+ * the same weight regardless of how many near-duplicate links to that
+ * host exist, while still treating genuinely distinct hosts as
+ * distinct evidence.
  */
 export function analyzeUrls(emailId: string, urls: string[]): UrlAnalysisResult {
   const analyzed = urls.map(analyzeOneUrl).filter((u): u is UrlFeatures => u !== null);
   const evidence: RiskEvidenceItem[] = [];
 
+  const byHost = new Map<string, UrlFeatures[]>();
   for (const u of analyzed) {
-    if (u.hasIpHost) {
+    const bucket = byHost.get(u.hostname);
+    if (bucket) bucket.push(u);
+    else byHost.set(u.hostname, [u]);
+  }
+
+  for (const [hostname, group] of byHost) {
+    const ipHosts = group.filter((u) => u.hasIpHost);
+    if (ipHosts.length > 0) {
       evidence.push({
         type: "raw_ip_host",
         severity: "high",
         weight: 30,
-        message: `A link uses a raw IP address as its host (${u.hostname}) instead of a domain name.`,
-        evidence: { url: u.url },
+        message: `${ipHosts.length} link(s) use a raw IP address as their host (${hostname}) instead of a domain name.`,
+        evidence: { hostname, count: ipHosts.length, urls: ipHosts.slice(0, 5).map((u) => u.url) },
         category: "urlDomain",
         provenance: "DETERMINISTIC_ANALYSIS",
+        strength: "strong",
       });
     }
-    if (u.hasAtSymbol || u.hasEncodedCharacters || u.hasMultipleSubdomains) {
+
+    const structural = group.filter((u) => u.hasAtSymbol || u.hasEncodedCharacters || u.hasMultipleSubdomains);
+    if (structural.length > 0) {
       evidence.push({
         type: "suspicious_structure",
         severity: "medium",
         weight: 15,
-        message: `A link has a suspicious structure (${[
-          u.hasAtSymbol && "embedded @ symbol",
-          u.hasEncodedCharacters && "percent-encoded characters",
-          u.hasMultipleSubdomains && "multiple subdomains",
+        message: `${structural.length} link(s) to ${hostname} have a suspicious structure (${[
+          structural.some((u) => u.hasAtSymbol) && "embedded @ symbol",
+          structural.some((u) => u.hasEncodedCharacters) && "percent-encoded characters",
+          structural.some((u) => u.hasMultipleSubdomains) && "multiple subdomains",
         ]
           .filter(Boolean)
           .join(", ")}).`,
         evidence: {
-          url: u.url,
-          hasAtSymbol: u.hasAtSymbol,
-          hasEncodedCharacters: u.hasEncodedCharacters,
-          hasMultipleSubdomains: u.hasMultipleSubdomains,
+          hostname,
+          count: structural.length,
+          urls: structural.slice(0, 5).map((u) => u.url),
+          hasAtSymbol: structural.some((u) => u.hasAtSymbol),
+          hasEncodedCharacters: structural.some((u) => u.hasEncodedCharacters),
+          hasMultipleSubdomains: structural.some((u) => u.hasMultipleSubdomains),
         },
         category: "urlDomain",
         provenance: "DETERMINISTIC_ANALYSIS",
+        strength: "weak",
       });
     }
-    if (u.isShortened) {
+
+    const shortened = group.filter((u) => u.isShortened);
+    if (shortened.length > 0) {
       evidence.push({
         type: "shortened_url",
         severity: "low",
         weight: 10,
-        message: `A link uses a URL-shortening service (${u.hostname}), which hides the real destination.`,
-        evidence: { url: u.url, hostname: u.hostname },
+        message: `${shortened.length} link(s) use a URL-shortening service (${hostname}), which hides the real destination.`,
+        evidence: { hostname, count: shortened.length, urls: shortened.slice(0, 5).map((u) => u.url) },
         category: "urlDomain",
         provenance: "DETERMINISTIC_ANALYSIS",
+        strength: "weak",
       });
     }
   }

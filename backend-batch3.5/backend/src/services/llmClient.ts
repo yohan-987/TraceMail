@@ -99,11 +99,13 @@ export function createGeminiProvider(options: {
         fetchImpl
       );
 
-      // TEMPORARY SAFE DIAGNOSTIC — status code only, never the request/
-      // response body, never the API key. Remove once Gemini responses
-      // are confirmed reliably AVAILABLE.
-      console.error(`[ai-debug] Gemini HTTP status: ${res.status}`);
-
+      // Status code is deliberately NOT logged unconditionally here —
+      // this function is called once per email processed, and a
+      // status-code line on every successful call (Prompt 10: "remove
+      // only debug logging that is not useful operationally") added
+      // nothing the error-path diagnostics below don't already cover
+      // on failure (the thrown LlmUnavailableError's message includes
+      // res.status, and aiAssessment.ts's catch block logs it there).
       if (!res.ok) {
         // Gemini error bodies are Google's own structured diagnostic text
         // about the request (e.g. "API key not valid", "quota exceeded",
@@ -116,7 +118,7 @@ export function createGeminiProvider(options: {
         } catch {
           // Body wasn't JSON — nothing more to safely extract.
         }
-        console.error(`[ai-debug] Gemini error detail: ${safeDetail || "(no structured error body)"}`);
+        console.error(`[llm-client] Gemini error detail: ${safeDetail || "(no structured error body)"}`);
         throw new LlmUnavailableError(`LLM HTTP ${res.status}${safeDetail ? `: ${safeDetail}` : ""}`);
       }
 
@@ -132,7 +134,7 @@ export function createGeminiProvider(options: {
         const finishReason = body.candidates?.[0]?.finishReason;
         const blockReason = body.promptFeedback?.blockReason;
         console.error(
-          `[ai-debug] Gemini returned no usable text — finishReason: ${finishReason ?? "none"}, blockReason: ${blockReason ?? "none"}`
+          `[llm-client] Gemini returned no usable text — finishReason: ${finishReason ?? "none"}, blockReason: ${blockReason ?? "none"}`
         );
         throw new LlmUnavailableError("LLM returned no text content.");
       }
@@ -153,7 +155,6 @@ export function createGeminiProvider(options: {
 export function llmProviderFromEnv(): LlmProvider | null {
   const apiKey = process.env.LLM_API_KEY?.trim();
   if (!apiKey) {
-    console.error("[ai-debug] provider initialized: false (no LLM_API_KEY configured)");
     return null;
   }
 
@@ -163,10 +164,8 @@ export function llmProviderFromEnv(): LlmProvider | null {
   if (provider === "gemini") {
     const model = process.env.LLM_MODEL?.trim();
     if (!model) {
-      console.error("[ai-debug] provider initialized: false (LLM_PROVIDER=gemini but LLM_MODEL is not set)");
       return null; // no safe default — require an explicit, current model name
     }
-    console.error(`[ai-debug] provider initialized: true | provider: gemini | model: ${model}`);
     return createGeminiProvider({
       apiKey,
       model,
@@ -176,7 +175,6 @@ export function llmProviderFromEnv(): LlmProvider | null {
   }
 
   const model = process.env.LLM_MODEL?.trim() || "claude-haiku-4-5-20251001";
-  console.error(`[ai-debug] provider initialized: true | provider: anthropic | model: ${model}`);
   return createAnthropicProvider({
     apiKey,
     apiUrl: process.env.LLM_API_URL?.trim() || "https://api.anthropic.com/v1/messages",

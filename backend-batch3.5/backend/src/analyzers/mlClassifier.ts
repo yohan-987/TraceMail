@@ -23,7 +23,10 @@ export interface MlPredictor {
    * staying optional so existing simple test mocks that only implement
    * `predict()` keep working unchanged.
    */
-  describe?(): { model: string; modelVersion: string; explanation: ModelExplanation };
+  /** tokenizer added for Prompt 10's unambiguous model/version display
+   *  (MODEL / VERSION / TOKENIZATION) -- sourced from the loaded model
+   *  file's own metadata.tokenizer, never hardcoded. */
+  describe?(): { model: string; modelVersion: string; tokenizer: string; explanation: ModelExplanation };
 }
 
 const ML_EVIDENCE_THRESHOLD = 0.6;
@@ -79,7 +82,7 @@ export async function getDefaultPredictor(): Promise<MlPredictor | null> {
       return { probability: predictPhishingProbability(model, input) };
     },
     describe() {
-      return { model: model.model, modelVersion: model.modelVersion, explanation };
+      return { model: model.model, modelVersion: model.modelVersion, tokenizer: model.metadata.tokenizer, explanation };
     },
   };
 }
@@ -112,6 +115,7 @@ export function assessMl(options: {
         emailId,
         model: null,
         modelVersion: null,
+        tokenizer: null,
         classification: null,
         probability: null,
         status: "UNAVAILABLE",
@@ -131,6 +135,7 @@ export function assessMl(options: {
           emailId,
           model: modelName,
           modelVersion,
+          tokenizer: described?.tokenizer ?? null,
           classification: null,
           probability: null,
           status: "ERROR",
@@ -144,6 +149,7 @@ export function assessMl(options: {
       emailId,
       model: modelName,
       modelVersion,
+      tokenizer: described?.tokenizer ?? null,
       classification,
       probability,
       status: "AVAILABLE",
@@ -177,6 +183,7 @@ export function assessMl(options: {
         emailId,
         model: MODEL_NAME,
         modelVersion: MODEL_VERSION,
+        tokenizer: null,
         classification: null,
         probability: null,
         status: "UNAVAILABLE",

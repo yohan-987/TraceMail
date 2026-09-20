@@ -2,6 +2,7 @@ import { sha256 } from "../utils/hash";
 import { generateEmailId } from "../utils/ids";
 import { parseEmlBuffer } from "../analyzers/emailParser";
 import { analyzeHeaders } from "../analyzers/headerForensics";
+import { analyzeForwarding } from "../analyzers/forwardingAnalyzer";
 import { extractIOCs } from "../analyzers/iocExtractor";
 import { analyzeUrls } from "../analyzers/urlAnalyzer";
 import { analyzeDomains } from "../analyzers/domainAnalyzer";
@@ -56,6 +57,7 @@ export async function ingestEmailBuffer(input: IngestEmailInput): Promise<EmailR
   const { parsed, warnings } = await parseEmlBuffer(emailId, buffer);
 
   const { headerAnalysis, authentication } = analyzeHeaders(parsed);
+  const forwarding = analyzeForwarding(parsed);
 
   const iocs = extractIOCs(parsed, headerAnalysis);
   const { urlAnalysis, evidence: urlEvidence } = analyzeUrls(emailId, iocs.urls);
@@ -84,6 +86,7 @@ export async function ingestEmailBuffer(input: IngestEmailInput): Promise<EmailR
       authentication,
       urlAnalysis,
       mlAssessment,
+      canonicalUrlIndicators: iocs.canonicalUrlIndicators,
       provider: llmProviderFromEnv(),
     }),
   ]);
@@ -121,6 +124,7 @@ export async function ingestEmailBuffer(input: IngestEmailInput): Promise<EmailR
     parsedEmail: parsed,
     headerAnalysis,
     authentication,
+    forwarding,
     iocs,
     urlAnalysis,
     domainAnalysis,

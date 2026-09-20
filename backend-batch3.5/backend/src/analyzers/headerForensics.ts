@@ -49,6 +49,7 @@ function checkAddressMismatches(parsed: ParsedEmail): HeaderAnomaly[] {
       evidence: { fromDomain, replyToDomain },
       category: "identity",
       provenance: "DETERMINISTIC_ANALYSIS",
+      strength: "strong",
     });
   }
 
@@ -64,6 +65,7 @@ function checkAddressMismatches(parsed: ParsedEmail): HeaderAnomaly[] {
       evidence: { fromDomain, returnPathDomain },
       category: "identity",
       provenance: "DETERMINISTIC_ANALYSIS",
+      strength: "weak",
     });
   }
 
@@ -94,6 +96,7 @@ function checkDisplayNameImpersonation(parsed: ParsedEmail): HeaderAnomaly[] {
         evidence: { displayName: from.displayName, fromDomain, brand: matchedBrand.name },
         category: "identity",
         provenance: "DETERMINISTIC_ANALYSIS",
+        strength: "strong",
       });
       return anomalies; // don't double-flag with the generic authority check below
     }
@@ -109,6 +112,7 @@ function checkDisplayNameImpersonation(parsed: ParsedEmail): HeaderAnomaly[] {
       evidence: { displayName: from.displayName, fromDomain, matchedKeyword },
       category: "identity",
       provenance: "DETERMINISTIC_ANALYSIS",
+      strength: "strong",
     });
   }
 
@@ -164,6 +168,7 @@ function checkMessageId(parsed: ParsedEmail): HeaderAnomaly[] {
       evidence: {},
       category: "identity",
       provenance: "DETERMINISTIC_ANALYSIS",
+      strength: "weak",
     });
     return anomalies;
   }
@@ -178,6 +183,7 @@ function checkMessageId(parsed: ParsedEmail): HeaderAnomaly[] {
       evidence: { messageId },
       category: "identity",
       provenance: "DETERMINISTIC_ANALYSIS",
+      strength: "weak",
     });
   }
 
@@ -193,6 +199,7 @@ function checkMessageId(parsed: ParsedEmail): HeaderAnomaly[] {
       evidence: { messageIdDomain, fromDomain },
       category: "identity",
       provenance: "DETERMINISTIC_ANALYSIS",
+      strength: "weak",
     });
   }
 
@@ -248,6 +255,7 @@ function authenticationAnomalies(auth: AuthenticationAnalysis): HeaderAnomaly[] 
       evidence: { spf: auth.spf.raw },
       category: "technical",
       provenance: "DETERMINISTIC_ANALYSIS",
+      strength: "strong",
     });
   } else if (auth.spf.result === "softfail") {
     anomalies.push({
@@ -258,6 +266,7 @@ function authenticationAnomalies(auth: AuthenticationAnalysis): HeaderAnomaly[] 
       evidence: { spf: auth.spf.raw },
       category: "technical",
       provenance: "DETERMINISTIC_ANALYSIS",
+      strength: "weak",
     });
   }
 
@@ -270,6 +279,7 @@ function authenticationAnomalies(auth: AuthenticationAnalysis): HeaderAnomaly[] 
       evidence: { dkim: auth.dkim.raw },
       category: "technical",
       provenance: "DETERMINISTIC_ANALYSIS",
+      strength: "strong",
     });
   }
 
@@ -282,6 +292,7 @@ function authenticationAnomalies(auth: AuthenticationAnalysis): HeaderAnomaly[] 
       evidence: { dmarc: auth.dmarc.raw, policy: auth.dmarc.policy },
       category: "technical",
       provenance: "DETERMINISTIC_ANALYSIS",
+      strength: "strong",
     });
   }
 

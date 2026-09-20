@@ -48,12 +48,17 @@ export function buildInfrastructureGraph(record: EmailRecord): InfrastructureGra
     type: InfrastructureGraphNodeType,
     key: string,
     label: string,
-    metadata?: Record<string, unknown>
+    metadata?: Record<string, unknown>,
+    // Prompt 10: purely a DISPLAY flag for the graph's suspicious-only
+    // filter -- reads already-computed analysis (see call sites below),
+    // never scored, never fed back into risk calculation.
+    suspicious?: boolean
   ): string {
     const id = nodeId(type.toLowerCase().replace(/_/g, "-"), key);
     const existing = nodes.get(id);
     if (existing) {
       if (metadata) existing.metadata = { ...existing.metadata, ...metadata };
+      if (suspicious) existing.suspicious = true;
       return id;
     }
     const node: InfrastructureGraphNode = {
@@ -63,6 +68,7 @@ export function buildInfrastructureGraph(record: EmailRecord): InfrastructureGra
       status: "AVAILABLE",
     };
     if (metadata && Object.keys(metadata).length > 0) node.metadata = metadata;
+    if (suspicious) node.suspicious = true;
     nodes.set(id, node);
     return id;
   }
@@ -108,7 +114,7 @@ export function buildInfrastructureGraph(record: EmailRecord): InfrastructureGra
 function addAddressNodes(
   record: EmailRecord,
   emailNodeId: string,
-  addNode: (type: InfrastructureGraphNodeType, key: string, label: string, metadata?: Record<string, unknown>) => string,
+  addNode: (type: InfrastructureGraphNodeType, key: string, label: string, metadata?: Record<string, unknown>, suspicious?: boolean) => string,
   addEdge: (source: string, target: string, relationship: string, provenance: GraphProvenance, evidence?: string[]) => void
 ): void {
   const parsed = record.parsedEmail;
@@ -136,7 +142,7 @@ function addAddressNodes(
 function addDomainNodes(
   record: EmailRecord,
   emailNodeId: string,
-  addNode: (type: InfrastructureGraphNodeType, key: string, label: string, metadata?: Record<string, unknown>) => string,
+  addNode: (type: InfrastructureGraphNodeType, key: string, label: string, metadata?: Record<string, unknown>, suspicious?: boolean) => string,
   addEdge: (source: string, target: string, relationship: string, provenance: GraphProvenance, evidence?: string[]) => void
 ): void {
   const domains = new Set<string>();
@@ -150,8 +156,17 @@ function addDomainNodes(
     if (usable(d.domain) && classifyIp(d.domain) === "INVALID") domains.add(d.domain.trim().toLowerCase());
   }
 
+  // Prompt 10: reuses domainAnalyzer.ts's ALREADY-COMPUTED lookalikeOf
+  // field (same field that drives the possible_lookalike_domain risk
+  // evidence) rather than recomputing anything — a domain the risk
+  // engine already flagged as a lookalike is marked suspicious for the
+  // graph filter too, with zero new analysis.
+  const lookalikeDomains = new Set(
+    (record.domainAnalysis?.domains ?? []).filter((d) => d.lookalikeOf).map((d) => d.domain.trim().toLowerCase())
+  );
+
   for (const domain of domains) {
-    const id = addNode("DOMAIN", domain, domain);
+    const id = addNode("DOMAIN", domain, domain, undefined, lookalikeDomains.has(domain));
     addEdge(emailNodeId, id, "contains_domain", "OBSERVED", ["IOC domain extraction"]);
   }
 }
@@ -164,7 +179,7 @@ function hostnameIsIp(hostname: string): boolean {
 function addUrlNodes(
   record: EmailRecord,
   emailNodeId: string,
-  addNode: (type: InfrastructureGraphNodeType, key: string, label: string, metadata?: Record<string, unknown>) => string,
+  addNode: (type: InfrastructureGraphNodeType, key: string, label: string, metadata?: Record<string, unknown>, suspicious?: boolean) => string,
   addEdge: (source: string, target: string, relationship: string, provenance: GraphProvenance, evidence?: string[]) => void
 ): void {
   const analyzed = new Map((record.urlAnalysis?.urls ?? []).map((u) => [u.url, u]));
@@ -188,14 +203,23 @@ function addUrlNodes(
       }
     }
 
-    const urlId = addNode("URL", raw, raw, hostname ? { hostname, domain } : undefined);
+    // Prompt 10: suspicious is set ONLY from hasIpHost — the one
+    // STRONG signal urlAnalyzer.ts computes (raw_ip_host, severity
+    // "high"; see Finding 3's weak/strong evidence model). Deliberately
+    // does NOT use the weak structural features (percent-encoding,
+    // multiple subdomains, shortened links) here — those are exactly
+    // what Findings 1-3 established are NOT independently meaningful,
+    // and lighting up the graph for them would reintroduce the same
+    // false-positive pattern this project spent most of its effort
+    // fixing at the scoring layer.
+    const urlId = addNode("URL", raw, raw, hostname ? { hostname, domain } : undefined, hasIpHost);
     addEdge(emailNodeId, urlId, "contains_url", "OBSERVED", ["IOC URL extraction"]);
 
     if (hasIpHost && hostname) {
       const ip = hostname.replace(/^\[|\]$/g, "");
       const classification = classifyIp(ip);
       if (classification === "INVALID") continue;
-      const ipId = addNode("IP", ip, ip, { classification });
+      const ipId = addNode("IP", ip, ip, { classification }, true);
       addEdge(urlId, ipId, "uses_ip_host", "DETERMINISTIC_ANALYSIS", ["Parsed URL hostname"]);
       continue;
     }
@@ -210,7 +234,7 @@ function addUrlNodes(
 function addIpNodes(
   record: EmailRecord,
   emailNodeId: string,
-  addNode: (type: InfrastructureGraphNodeType, key: string, label: string, metadata?: Record<string, unknown>) => string,
+  addNode: (type: InfrastructureGraphNodeType, key: string, label: string, metadata?: Record<string, unknown>, suspicious?: boolean) => string,
   addEdge: (source: string, target: string, relationship: string, provenance: GraphProvenance, evidence?: string[]) => void
 ): void {
   const receivedIps = new Set<string>();
@@ -235,7 +259,7 @@ function addIpNodes(
 
 function addDnsResolutions(
   record: EmailRecord,
-  addNode: (type: InfrastructureGraphNodeType, key: string, label: string, metadata?: Record<string, unknown>) => string,
+  addNode: (type: InfrastructureGraphNodeType, key: string, label: string, metadata?: Record<string, unknown>, suspicious?: boolean) => string,
   addEdge: (source: string, target: string, relationship: string, provenance: GraphProvenance, evidence?: string[]) => void
 ): void {
   for (const intel of record.infrastructure?.domainIntelligence ?? []) {
@@ -273,7 +297,7 @@ function geoMetadata(rec: GeoIpRecord, confidence: number | null): Record<string
 
 function addIpIntelligence(
   record: EmailRecord,
-  addNode: (type: InfrastructureGraphNodeType, key: string, label: string, metadata?: Record<string, unknown>) => string,
+  addNode: (type: InfrastructureGraphNodeType, key: string, label: string, metadata?: Record<string, unknown>, suspicious?: boolean) => string,
   addEdge: (source: string, target: string, relationship: string, provenance: GraphProvenance, evidence?: string[]) => void
 ): void {
   const infra = record.infrastructure;

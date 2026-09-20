@@ -36,11 +36,32 @@ export type AttackArchetype =
   | "DIRECT_MALICIOUS_INFRASTRUCTURE"
   | "INCONCLUSIVE";
 
+/**
+ * Confidence hierarchy for the COMPROMISED_ACCOUNT archetype specifically
+ * (Prompt 7). Populated ONLY when archetype === "COMPROMISED_ACCOUNT" —
+ * undefined for the other four archetypes, which already carry their
+ * own evidence-specific confidence via the top-level `confidence` field
+ * and don't need a second, narrower tier.
+ *
+ * "CONFIRMED" is defined here but NEVER emitted by assessArchetype()
+ * today: actually CONFIRMING account compromise (as opposed to
+ * inferring a possibility from email content/header/infrastructure
+ * forensics) would need an evidence source this codebase does not
+ * have — e.g. a login-anomaly/IP-history baseline or a mailbox-
+ * provider security-log integration. Emitting CONFIRMED without that
+ * would be inventing forensic evidence, which this prompt explicitly
+ * prohibits. The type includes it for forward compatibility if such a
+ * source is ever added — do not start emitting it without one.
+ */
+export type CompromiseTier = "CONFIRMED" | "LIKELY" | "POSSIBLE" | "INCONCLUSIVE";
+
 export interface ArchetypeAssessment {
   archetype: AttackArchetype;
   /** Short, specific evidence citations — never a generic placeholder. */
   basis: string[];
   confidence: "low" | "medium" | "high";
+  /** Only present when archetype === "COMPROMISED_ACCOUNT". */
+  compromiseTier?: CompromiseTier;
 }
 
 interface AssessArchetypeInput {
@@ -139,22 +160,70 @@ export function assessArchetype(input: AssessArchetypeInput): ArchetypeAssessmen
   }
 
   // 4. COMPROMISED_ACCOUNT
+  //
+  // Prompt 7: graduated into a conservative confidence hierarchy rather
+  // than a single fire/don't-fire branch, on top of Finding 4's earlier
+  // fix (which already required a strong content signal instead of
+  // firing off any content score). Thresholds:
+  //
+  //   POSSIBLE — clean auth (someone with legitimate access to the
+  //   sending path sent this) + exactly ONE strong, specific content
+  //   signal (credential-request OR financial-request language) + no
+  //   competing explanation (no lookalike domain, no cloud/VPS marker,
+  //   no known-suspicious infrastructure). Minimum bar: one real
+  //   signal, taken at face value, nothing corroborating it yet.
+  //
+  //   LIKELY — the POSSIBLE bar PLUS a second, independent strong
+  //   signal: either BOTH credential-request AND financial-request
+  //   language are present (two distinct social-engineering asks in
+  //   one message), or a grounded ML/AI content classification
+  //   corroborates the heuristic match (ml_phishing_classification, or
+  //   ai_semantic_phishing tagged strength "strong" per Finding 8 /
+  //   Prompt 6's isGroundedConcern — an ungrounded, stylistic-only AI
+  //   read does NOT corroborate anything here). One signal type alone,
+  //   however strong, stays at POSSIBLE — it is not corroborated.
+  //
+  //   CONFIRMED — never emitted; see CompromiseTier's doc comment for
+  //   why (no account-security-log evidence source exists here).
+  //
+  // A legitimate promotional email with only urgency/call-to-action
+  // content (no credential/financial-request language at all) never
+  // reaches this branch at all — contentHasStrongSignal is false, so
+  // it falls through to INCONCLUSIVE below, exactly as before Prompt 7.
+  const strongContentTypes = ["credential_request_language", "financial_request_language"];
+  const strongContentMatches = strongContentTypes.filter((t) => hasType(contentCategory, t));
+  const hasCorroboratingMlOrAi =
+    (contentCategory?.evidence ?? []).some(
+      (e) =>
+        (e.type === "ml_phishing_classification" || e.type === "ai_semantic_phishing") && e.strength !== "weak"
+    );
+  const contentHasStrongSignal = strongContentMatches.length > 0;
+
   if (
     authAvailable &&
     authCleanPass &&
     contentAvailable &&
     (contentCategory?.score ?? 0) > CONTENT_MODERATE_THRESHOLD &&
+    contentHasStrongSignal &&
     !lookalikeOrRawIp &&
     !cloudVpsMarker &&
     !knownSuspicious
   ) {
+    const corroborated = strongContentMatches.length >= 2 || hasCorroboratingMlOrAi;
+    const tier: CompromiseTier = corroborated ? "LIKELY" : "POSSIBLE";
+
     const basis = ["SPF/DKIM/DMARC all pass (authentic sending path)"];
-    const contentEvidence = contentCategory?.evidence.filter((e) => e.weight > 0).slice(0, 2) ?? [];
+    const contentEvidence = contentCategory?.evidence.filter((e) => e.weight > 0).slice(0, 3) ?? [];
     for (const e of contentEvidence) basis.push(e.message);
+    if (!corroborated) {
+      basis.push("Only one corroborating signal found — treated as POSSIBLE, not confirmed or likely, compromise");
+    }
+
     return {
       archetype: "COMPROMISED_ACCOUNT",
       basis,
-      confidence: contentEvidence.length >= 2 ? "medium" : "low",
+      confidence: corroborated ? "medium" : "low",
+      compromiseTier: tier,
     };
   }
 

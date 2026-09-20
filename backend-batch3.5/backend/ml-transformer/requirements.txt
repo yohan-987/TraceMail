@@ -1,0 +1,10 @@
+# Not installed in the environment this ML upgrade was performed in
+# (no network access, `pip install transformers` fails with "no matching
+# distribution" — confirmed by attempting it, see docs/ml/AUDIT.md
+# Phase 6). Pin versions when actually setting this up; these are
+# unpinned on purpose since no install was performed here to verify
+# specific versions.
+torch
+transformers
+scikit-learn
+numpy

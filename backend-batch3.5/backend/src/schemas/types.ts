@@ -101,6 +101,23 @@ export interface HeaderAnomaly {
   weight: number; // risk contribution, NOT a probability — the risk engine consumes this
   category: RiskCategory;
   provenance: EvidenceProvenance;
+  /**
+   * Evidence-strength tag (see docs/audit/PHASE1-AUDIT.md, Finding 3).
+   * "weak" = a contextual signal that is common in entirely legitimate
+   * mail on its own — URL exists, percent-encoding, multiple
+   * subdomains, a Return-Path/Message-ID mismatch from third-party send
+   * infrastructure, ordinary urgency/call-to-action marketing copy —
+   * and must not, by accumulation alone, drive a category score into
+   * "high" territory. "strong" = a signal that specifically indicates
+   * malicious intent (confirmed malicious reputation, credential-
+   * harvesting destination, lookalike/homograph domain, auth failure,
+   * malicious attachment hash, brand/authority impersonation, etc).
+   * Optional: evidence producers written before this field existed
+   * (domain reputation, infrastructure, ML/AI evidence) omit it, and
+   * the risk engine treats an untagged item as equivalent to "strong"
+   * (i.e. unrestricted) so those existing sources are unaffected.
+   */
+  strength?: "weak" | "strong";
 }
 
 // HeaderAnomaly's shape is deliberately general-purpose (not header-
@@ -150,13 +167,56 @@ export interface AuthenticationAnalysis {
   dmarc: { result: AuthResult | "unknown"; policy: string | null; raw: string | null };
 }
 
+/**
+ * Forensic-safe forwarded-email model (docs/audit/PHASE1-AUDIT.md,
+ * Finding 5 / Prompt 5). Distinguishes the FORWARDER (whoever's account
+ * sent the message that reached this mailbox — always `parsed.from[0]`,
+ * never assumed to be the original author) from the ORIGINAL SENDER
+ * (the sender represented inside a recognized forwarded-content block,
+ * if one is found and reliably parseable). See forwardingAnalyzer.ts.
+ */
+export interface ForwardingAnalysis {
+  emailId: string;
+  isForwarded: boolean;
+  forwarder: EmailAddress | null;
+  /** "UNKNOWN" (not null/omitted) when forwarding is detected but the
+   *  original sender could not be reliably parsed out of the body —
+   *  labeled explicitly rather than invented (Prompt 5, requirement 5). */
+  originalSender: EmailAddress | "UNKNOWN" | null;
+  originalSubject: string | null;
+  /** Number of separate forwarded-header blocks found. originalSender
+   *  reflects only the OUTERMOST block; deeper nesting is not resolved —
+   *  a count > 1 is a signal for manual review, not something scored. */
+  nestedForwardCount: number;
+  detectionEvidence: string[];
+  confidence: "high" | "low" | "none";
+}
+
 export interface IOCSet {
   emailId: string;
   ips: string[];
   domains: string[];
-  urls: string[];
+  urls: string[]; // RAW, exact-string-deduplicated occurrences — preserved for forensic display (Prompt 4, req. 1/4)
+  /**
+   * CANONICAL indicators: raw URLs grouped by hostname (see
+   * iocExtractor.ts's groupUrlsByHost, docs/audit/PHASE1-AUDIT.md
+   * Finding 1 and Prompt 4). This is the "same underlying domain/IP/
+   * hash/URL must not receive unlimited risk simply because it appears
+   * repeatedly" model: a legitimate bulk email with 90 unique tracking-
+   * parameter URLs to one host produces ONE canonical indicator here
+   * (occurrenceCount: 90), not 90. `urls` above is left untouched for
+   * forensic/audit display of every raw occurrence; this field is what
+   * risk calculation and indicator-count summaries should prefer.
+   */
+  canonicalUrlIndicators: CanonicalUrlIndicator[];
   hashes: string[];
   emails: string[];
+}
+
+export interface CanonicalUrlIndicator {
+  hostname: string;
+  occurrenceCount: number; // how many raw URLs (from `urls` above) share this hostname
+  sampleUrls: string[]; // up to 5 representative raw URLs, for forensic display without repeating all N
 }
 
 export interface URLAnalysis {
@@ -237,6 +297,12 @@ export interface MLAssessment {
   emailId: string;
   model: string | null;
   modelVersion: string | null;
+  /** Tokenization strategy actually used by the loaded model (Prompt
+   *  10's "unambiguous model/version display": MODEL / VERSION /
+   *  TOKENIZATION). Sourced from the loaded model file's own
+   *  metadata.tokenizer — never hardcoded. Null when the model
+   *  couldn't be described (no predictor loaded, or describe() failed). */
+  tokenizer: string | null;
   classification: MLClassification | null;
   /** Model score in [0, 1] — not a calibrated probability. */
   probability: number | null;
@@ -257,6 +323,24 @@ export interface AIAssessment {
   impersonation: number | null;
   socialEngineering: number | null;
   malwareDelivery: number | null;
+  /** Qualitative concern level the model assigned — for DISPLAY as a
+   *  "Semantic Content Assessment" alongside, never in place of, the
+   *  deterministic canonical risk level (Prompt 6). Never drives
+   *  scoring directly; see aiAssessment.ts's groundedness gating. */
+  concernLevel: "none" | "low" | "medium" | "high" | null;
+  /** Up to 5 short reasons, each an OBSERVATION the model distinguished
+   *  from its security significance (Prompt 6, requirement 2) — not a
+   *  restatement of raw evidence, and not one entry per near-duplicate
+   *  URL (the model is only ever shown canonical, host-grouped URL
+   *  indicators — see buildLlmUserPayload — so it structurally cannot
+   *  produce 10 copies of the same URL finding). */
+  topReasons: string[];
+  /** A benign, non-malicious explanation for the same observations,
+   *  when one plausibly applies (e.g. "marketing tracking links are
+   *  routine for promotional senders") — null when none applies, never
+   *  fabricated to seem balanced. */
+  benignExplanation: string | null;
+  confidence: "low" | "medium" | "high" | null;
   attackType: string | null;
   summary: string | null;
   recommendedActions: string[];
@@ -336,6 +420,17 @@ export interface InfrastructureGraphNode {
   type: InfrastructureGraphNodeType;
   label: string;
   status?: string;
+  /** Prompt 10 (graph "suspicious-only filtering"). A purely DERIVED
+   *  display flag for the relationship graph's filter toggle — reads
+   *  already-computed analysis results (domainAnalyzer.ts's
+   *  lookalikeOf, urlAnalyzer.ts's per-URL structural features) rather
+   *  than computing anything new, and contributes NOTHING to risk
+   *  scoring. Omitted (not `false`) when not applicable to this node
+   *  type, so its absence never reads as "confirmed clean" — only
+   *  DOMAIN/URL/IP nodes ever set it explicitly. See
+   *  infrastructureGraph.ts for exactly which existing evidence each
+   *  node type checks. */
+  suspicious?: boolean;
   metadata?: Record<string, unknown>;
 }
 
@@ -378,6 +473,10 @@ export interface EmailRecord {
   parsedEmail: ParsedEmail | null;
   headerAnalysis: HeaderAnalysis | null;
   authentication: AuthenticationAnalysis | null;
+  // Optional (not `| null`) so records stored before Prompt 5 existed
+  // still parse correctly with this field simply absent rather than
+  // requiring a migration.
+  forwarding?: ForwardingAnalysis | null;
   iocs: IOCSet | null;
   urlAnalysis: URLAnalysis | null;
   domainAnalysis: DomainAnalysis | null;

@@ -18,11 +18,6 @@ export async function lookupWhois(
 
     const result = await whoisJson(domain);
 
-    console.log(
-      "RAW WHOIS RESULT:",
-      JSON.stringify(result, null, 2)
-    );
-
     /*
      * whois-json usually returns a flat WHOIS record.
      * For responses that are nested, use the first nested object
@@ -48,11 +43,6 @@ export async function lookupWhois(
                 !Array.isArray(value)
             ) ?? result
         : result;
-
-    console.log(
-      "NORMALIZED WHOIS RECORD:",
-      JSON.stringify(record, null, 2)
-    );
 
     /*
      * whois-json uses camelCase fields for common WHOIS records,
@@ -116,11 +106,24 @@ export async function lookupWhois(
       registrar,
       domainAgeDays,
     };
-  } catch {
+  } catch (err) {
     /*
      * WHOIS network failure, unsupported TLD, rate limit, or
      * malformed response: treat WHOIS evidence as unavailable.
+     *
+     * Prompt 10: this replaces two unconditional raw-record console.log
+     * dumps that fired on every successful lookup (including the full
+     * WHOIS record, which can carry registrant name/organization/
+     * contact fields depending on the domain's privacy settings) with
+     * a single, bounded, PII-free log on the FAILURE path only — the
+     * domain name and error type, nothing from the WHOIS response
+     * itself. This is the only lookupWhois() logging now; the success
+     * path is intentionally silent (the registrar/domainAgeDays result
+     * is already returned to and used by the caller).
      */
+    console.error(
+      `[domain-intelligence] WHOIS lookup failed for ${domain}: ${err instanceof Error ? err.constructor.name : "unknown error"}`
+    );
     return {
       registrar: null,
       domainAgeDays: null,

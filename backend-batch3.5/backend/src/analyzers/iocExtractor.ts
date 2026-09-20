@@ -1,4 +1,4 @@
-import type { ParsedEmail, HeaderAnalysis, IOCSet } from "../schemas/types";
+import type { ParsedEmail, HeaderAnalysis, IOCSet, CanonicalUrlIndicator } from "../schemas/types";
 import net from "net";
 
 const URL_RE = /https?:\/\/[^\s"'<>)\]]+/gi;
@@ -36,6 +36,33 @@ export function hostnameOf(url: string): string | null {
 
 function dedupe<T>(items: T[]): T[] {
   return Array.from(new Set(items));
+}
+
+/**
+ * Groups raw, exact-string-deduplicated URLs by hostname into canonical
+ * indicators (see IOCSet.canonicalUrlIndicators, docs/audit/PHASE1-AUDIT.md
+ * Finding 1 and Prompt 4). This is the single source of truth for "how
+ * many distinct destinations does this email actually point to" — raw
+ * occurrence count (e.g. 90 uniquely-tokenized tracking links) is kept
+ * as metadata (`occurrenceCount`), not discarded, but the canonical
+ * count (e.g. 2-3 real hosts) is what should drive any "N indicators"
+ * summary or count-based judgment.
+ */
+export function groupUrlsByHost(urls: string[]): CanonicalUrlIndicator[] {
+  const byHost = new Map<string, string[]>();
+  for (const url of urls) {
+    const hostname = hostnameOf(url);
+    if (!hostname) continue; // unparseable URL — not a usable indicator, excluded from canonical grouping
+    const bucket = byHost.get(hostname);
+    if (bucket) bucket.push(url);
+    else byHost.set(hostname, [url]);
+  }
+
+  return Array.from(byHost.entries()).map(([hostname, group]) => ({
+    hostname,
+    occurrenceCount: group.length,
+    sampleUrls: group.slice(0, 5),
+  }));
 }
 
 /**
@@ -105,6 +132,7 @@ export function extractIOCs(parsed: ParsedEmail, headerAnalysis: HeaderAnalysis)
     ips,
     domains,
     urls,
+    canonicalUrlIndicators: groupUrlsByHost(urls),
     hashes,
     emails,
   };

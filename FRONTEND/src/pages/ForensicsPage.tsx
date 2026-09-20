@@ -76,6 +76,17 @@ interface BackendEmailDetail {
     dkim?: { result: string };
     dmarc?: { result: string };
   };
+  // Prompt 5 — forensic-safe forwarded-email model. Optional/defensive
+  // like earliestOrigin above: nothing here breaks if a record predates
+  // this field (backend stores it as optional too).
+  forwarding?: {
+    isForwarded: boolean;
+    forwarder?: { email?: string; displayName?: string } | null;
+    originalSender?: { email?: string; displayName?: string } | 'UNKNOWN' | null;
+    originalSubject?: string | null;
+    nestedForwardCount?: number;
+    confidence?: 'high' | 'low' | 'none';
+  };
   explanations?: Array<{ message: string }>;
 }
 
@@ -110,6 +121,11 @@ export interface MappedForensicEmail {
   routingAnomalies: string[];
   attachments: Array<any>;
   evidenceSha256: string;
+  // Prompt 5 — forensic-safe forwarded-email model.
+  isForwarded: boolean;
+  forwardedByAddress: string | null;
+  originalSenderDisplay: string | null; // null when not forwarded; "Unknown" when forwarded but unresolved; else the parsed original sender
+  forwardingConfidence: 'high' | 'low' | 'none';
   indicators: any[];
   infraNodes: any[];
   infraEdges: any[];
@@ -210,7 +226,20 @@ function mapDetailedApiToScannedEmail(apiData: BackendEmailDetail): MappedForens
     routingAnomalies: apiData.headerAnalysis?.earliestOrigin?.routingAnomalies ?? [],
     attachments: apiData.parsedEmail?.attachments || [],
     evidenceSha256: apiData.evidence?.sha256 || 'N/A',
-    
+
+    // Prompt 5: never assume the outer From is the original author when
+    // forwarding is detected — forwardedByAddress is explicitly labeled
+    // as such, and an unresolved original sender is shown as "Unknown"
+    // rather than silently falling back to the forwarder's address.
+    isForwarded: apiData.forwarding?.isForwarded ?? false,
+    forwardedByAddress: apiData.forwarding?.isForwarded ? apiData.forwarding?.forwarder?.email ?? null : null,
+    originalSenderDisplay: !apiData.forwarding?.isForwarded
+      ? null
+      : apiData.forwarding.originalSender === 'UNKNOWN' || !apiData.forwarding.originalSender
+        ? 'Unknown'
+        : apiData.forwarding.originalSender.email ?? 'Unknown',
+    forwardingConfidence: apiData.forwarding?.confidence ?? 'none',
+
     indicators: [],
     infraNodes: [],
     infraEdges: [],
@@ -384,8 +413,30 @@ function SenderView({ email }: { email: MappedForensicEmail }) {
         <div className="flex items-center gap-2 mb-4">
           <User className="w-3.5 h-3.5 text-accent-500" />
           <SectionLabel>Sender Identity Analysis</SectionLabel>
+          {email.isForwarded ? <Badge variant="warning">Forwarded Email</Badge> : null}
         </div>
         <div className="space-y-3">
+          {email.isForwarded ? (
+            <>
+              <Field
+                label="Forwarded By"
+                value={email.forwardedByAddress || 'Unknown'}
+                mono
+                note="The account that forwarded this message — not necessarily the original author"
+              />
+              <Field
+                label="Original Sender"
+                value={email.originalSenderDisplay || 'Unknown'}
+                mono
+                note={
+                  email.forwardingConfidence === 'low'
+                    ? 'Could not be reliably extracted from the forwarded content — shown as Unknown rather than guessed'
+                    : 'Extracted from the forwarded message content'
+                }
+              />
+              <Divider />
+            </>
+          ) : null}
           <Field label="Display Name" value={email.senderName} danger={email.senderAnomalies.length > 0} note={email.senderAnomalies[0]} />
           <Field label="From Address" value={email.sender} mono danger={email.senderAnomalies.length > 0} />
           <Field label="Reply-To" value={replyTo} mono danger={replyTo !== 'N/A' && replyTo !== email.sender} note={replyTo !== email.sender ? 'Differs from From address' : undefined} />
@@ -443,6 +494,13 @@ function AuthView({ email }: { email: MappedForensicEmail }) {
       <Card className="mt-5 p-5">
         <SectionLabel className="block mb-2">Authentication Summary</SectionLabel>
         <p className="text-[13px] text-ink-400 leading-relaxed">{email.authenticationSummary}</p>
+        {email.isForwarded ? (
+          <p className="text-[12px] text-amber-400 leading-relaxed mt-3 flex items-start gap-1.5">
+            <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            This email was detected as forwarded. The results above validate the forwarding account&apos;s send —
+            they do not apply to the original sender represented inside the forwarded content.
+          </p>
+        ) : null}
       </Card>
     </div>
   );

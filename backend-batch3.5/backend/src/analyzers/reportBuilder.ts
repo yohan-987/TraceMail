@@ -3,6 +3,7 @@ import type {
   EmailRecord,
   Recommendation,
   RelatedEmailsResponse,
+  CanonicalUrlIndicator,
 } from "../schemas/types";
 import { generateRecommendations } from "./recommendations";
 import { assessArchetype, type ArchetypeAssessment } from "./archetypeAssessment";
@@ -50,6 +51,23 @@ export interface ReportAuthentication {
   dkim: { result: string; raw: string | null } | null;
   dmarc: { result: string; policy: string | null; raw: string | null } | null;
   status: "AVAILABLE" | "UNAVAILABLE";
+  /** Set only when forwarding.isForwarded — caveats that these results
+   *  validate the FORWARDER's send, not the original sender represented
+   *  inside the forwarded content (Prompt 5, requirement 7). Null
+   *  otherwise; never fabricated when forwarding status is unknown. */
+  contextNote: string | null;
+}
+
+/** Drives the UI's "FORWARDED EMAIL" / "Original sender" / "Forwarded
+ *  by" display (Prompt 5). Mirrors ForwardingAnalysis directly — this
+ *  is not a second computation, just the same object reported. */
+export interface ReportForwarding {
+  isForwarded: boolean;
+  forwarder: EmailAddress | null;
+  originalSender: EmailAddress | "UNKNOWN" | null;
+  originalSubject: string | null;
+  nestedForwardCount: number;
+  confidence: "high" | "low" | "none";
 }
 
 export interface ReportReceivedHop {
@@ -85,7 +103,12 @@ export interface ReportThreatAssessment {
 export interface ReportIocs {
   ips: string[];
   domains: string[];
-  urls: string[];
+  urls: string[]; // raw occurrences — every distinct string, forensic completeness
+  /** Canonical, host-grouped URL indicators (see IOCSet.canonicalUrlIndicators,
+   *  docs/audit/PHASE1-AUDIT.md Finding 1 / Prompt 4) — e.g. 90 uniquely-
+   *  tokenized tracking links to one host collapse to ONE entry here with
+   *  occurrenceCount: 90, rather than reading as 90 separate indicators. */
+  canonicalUrlIndicators: CanonicalUrlIndicator[];
   hashes: string[];
   emails: string[];
   status: "AVAILABLE" | "UNAVAILABLE";
@@ -158,6 +181,7 @@ export interface ForensicReportContent {
   evidenceIntegrity: ReportEvidenceIntegrity;
   emailMetadata: ReportEmailMetadata;
   authentication: ReportAuthentication;
+  forwarding: ReportForwarding;
   headerForensics: ReportHeaderForensics;
   threatAssessment: ReportThreatAssessment;
   iocs: ReportIocs;
@@ -261,8 +285,22 @@ export function buildForensicReport(
           dkim: record.authentication.dkim,
           dmarc: record.authentication.dmarc,
           status: "AVAILABLE",
+          contextNote: record.forwarding?.isForwarded
+            ? "This email was detected as forwarded. SPF/DKIM/DMARC results reflect the forwarding account's send, not the original sender represented inside the forwarded content."
+            : null,
         }
-      : { spf: null, dkim: null, dmarc: null, status: "UNAVAILABLE" },
+      : { spf: null, dkim: null, dmarc: null, status: "UNAVAILABLE", contextNote: null },
+
+    forwarding: record.forwarding
+      ? {
+          isForwarded: record.forwarding.isForwarded,
+          forwarder: record.forwarding.forwarder,
+          originalSender: record.forwarding.originalSender,
+          originalSubject: record.forwarding.originalSubject,
+          nestedForwardCount: record.forwarding.nestedForwardCount,
+          confidence: record.forwarding.confidence,
+        }
+      : { isForwarded: false, forwarder: null, originalSender: null, originalSubject: null, nestedForwardCount: 0, confidence: "none" },
 
     headerForensics: record.headerAnalysis
       ? {
@@ -317,11 +355,12 @@ export function buildForensicReport(
           ips: record.iocs.ips,
           domains: record.iocs.domains,
           urls: record.iocs.urls,
+          canonicalUrlIndicators: record.iocs.canonicalUrlIndicators,
           hashes: record.iocs.hashes,
           emails: record.iocs.emails,
           status: "AVAILABLE",
         }
-      : { ips: [], domains: [], urls: [], hashes: [], emails: [], status: "UNAVAILABLE" },
+      : { ips: [], domains: [], urls: [], canonicalUrlIndicators: [], hashes: [], emails: [], status: "UNAVAILABLE" },
 
     urlDomainAnalysis: {
       urls: (record.urlAnalysis?.urls ?? []).map((u) => ({
