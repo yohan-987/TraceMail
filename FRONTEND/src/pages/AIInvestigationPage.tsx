@@ -1,93 +1,113 @@
-import { useState, useEffect } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useState, useEffect, useId, type ReactNode } from 'react';
+import { Link, useLocation } from 'react-router-dom';
 import {
+  Mail,
+  ShieldCheck,
+  Box,
+  Crosshair,
   Brain,
+  BrainCircuit,
   Sparkles,
+  FileText,
   ListChecks,
-  ShieldQuestion,
-  FlaskConical,
-  ChevronDown,
-  ChevronUp,
-  Gauge,
-  Route,
+  User,
+  Link2,
+  Server,
+  ChevronRight,
 } from 'lucide-react';
-import { ThreatRing } from '@/components/ThreatRing';
 import { Card, SectionLabel, Badge } from '@/components/ui/Primitives';
 import { useActiveCase } from '@/context/ActiveCaseContext';
 import { InvestigationShell } from '@/components/InvestigationShell';
 import {
   InvestigationWorkspace,
-  PreviewField,
   PreviewInvestigateButton,
 } from '@/components/InvestigationWorkspace';
 import { ProvenanceTag } from '@/components/ProvenanceTag';
+import {
+  SectionPanel,
+  ExplainToggle,
+  ExplainPanel,
+  StatusNotice,
+  useExplain,
+} from '@/components/investigation/SectionPanel';
+import { RiskRadar, DIMENSION_COLORS } from '@/components/investigation/RiskRadar';
 import { cn } from '@/lib/utils';
 import { getEmail as fetchEmailDetails } from '@/api/api';
+import { mapApiEmailToUiEmail } from '@/api/emailMapper';
+import {
+  CATEGORY_LABELS,
+  archetypeLabel,
+  asScore,
+  authTone,
+  explainAi,
+  explainArchetype,
+  explainMl,
+  explainRiskDimensions,
+  explainRiskEngine,
+  explainTechnicalEvidence,
+  formatModelName,
+  formatUtcTimestamp,
+  fractionToPercent,
+  groupRepeated,
+  levelTone,
+  normalizeAvailability,
+  orderedCategoryKeys,
+  percentLabel,
+  probabilityToPercent,
+  resolveRiskDimensions,
+  usableCategoryScore,
+  type AuthTone,
+  type AvailabilityStatus,
+  type CategoryScores,
+  type LevelTone,
+  type ResolvedRiskDimensions,
+} from '@/lib/investigationView';
 
-// Prompt 9 — AI Investigation UX. Restructures presentation into a
-// layered view (executive verdict -> top evidence -> technical vs
-// content -> attack story -> confidence -> expandable detailed
-// analysis) and groups/dedupes repeated observations before display.
-// Deliberately does NOT change any backend scoring or LLM semantics:
-// every value below is read from the exact same fields this page
-// already read before this pass (plus the new Prompt 6/7 fields —
-// aiAssessment.concernLevel/topReasons/benignExplanation/confidence
-// and archetype.compromiseTier — which are additive, not replacements
-// for anything that existed here already).
+// Prompt 12 — AI Investigation UI/UX redesign.
+//
+// FRONTEND PRESENTATION ONLY. Every value on this page is read from the
+// same GET /api/v1/emails/:emailId response the page already used before
+// this pass (risk / archetype / mlAssessment / aiAssessment /
+// authentication / iocs / explanations / forwarding / evidence). Nothing
+// here computes, re-weights or re-classifies risk: the deterministic risk
+// engine remains the sole authority for the overall verdict, the ML model
+// and the AI interpretation stay clearly secondary, and the archetype
+// stays an evidence-based label rather than an attribution.
+//
+// Information flow (matches the reference layout):
+//   header -> Risk Engine Breakdown -> 3D Risk Analysis -> Attack
+//   Archetype + ML Assessment -> AI-Assisted Interpretation ->
+//   Technical Evidence (collapsed) -> Detailed Analysis (collapsed)
+//
+// Pure formatting / dimension-selection / explanation-text logic lives in
+// @/lib/investigationView (unit-tested with node --test).
 
-type AvailabilityStatus =
-  | 'Available'
-  | 'Unavailable'
-  | 'Inconclusive';
+const TECHNIQUE_FLAGS: Array<{ label: string; key: string }> = [
+  { label: 'Phishing Intent', key: 'phishingIntent' },
+  { label: 'Credential Harvesting', key: 'credentialHarvesting' },
+  { label: 'Impersonation', key: 'impersonation' },
+  { label: 'Financial Fraud', key: 'financialFraud' },
+  { label: 'Social Engineering', key: 'socialEngineering' },
+];
 
-const TECHNIQUE_FLAGS = [
-  'Phishing Intent',
-  'Credential Harvesting',
-  'Impersonation',
-  'Financial Fraud',
-  'Social Engineering',
-] as const;
+const LEVEL_TEXT: Record<LevelTone, string> = {
+  low: 'text-emerald-400',
+  moderate: 'text-amber-400',
+  high: 'text-orange-400',
+  critical: 'text-accent-400',
+  unknown: 'text-ink-400',
+};
 
-function normalizeAvailability(
-  value: unknown
-): AvailabilityStatus {
-  const normalized = String(value ?? '').toLowerCase();
+const AUTH_TONE_TEXT: Record<AuthTone | 'plain', string> = {
+  good: 'text-emerald-400',
+  bad: 'text-accent-400',
+  neutral: 'text-ink-300',
+  plain: 'text-ink-100',
+};
 
-  switch (normalized) {
-    case 'available':
-    case 'success':
-    case 'ok':
-      return 'Available';
-
-    case 'inconclusive':
-      return 'Inconclusive';
-
-    case 'unavailable':
-    case 'error':
-    case 'not_applicable':
-    case 'not applicable':
-    case '':
-    default:
-      return 'Unavailable';
-  }
-}
-
-/** Frontend F4 — SNAKE_CASE archetype value to Title Case for display,
- *  e.g. "ANONYMIZED_INFRASTRUCTURE" -> "Anonymized Infrastructure". */
-function archetypeLabel(value: string): string {
-  return value
-    .toLowerCase()
-    .split('_')
-    .map((word) => (word ? word.charAt(0).toUpperCase() + word.slice(1) : word))
-    .join(' ');
-}
-
-/** Frontend F4 — reuses this project's existing Badge variants only
- *  (see statusColor in CasesPage.tsx / badgeStyles in Primitives.tsx for
- *  the same palette) rather than inventing new colors. INCONCLUSIVE is
- *  explicitly 'neutral', not a failure color — it's a legitimate,
- *  honest answer when evidence is thin, and must never read as worse
- *  than the other four archetypes. */
+/** INCONCLUSIVE is explicitly neutral, never a failure colour: it is an
+ *  honest answer when evidence is thin and must not read as worse than
+ *  the other archetypes. */
 function archetypeVariant(value: string): 'neutral' | 'warning' | 'danger' | 'critical' {
   switch (value) {
     case 'DIRECT_MALICIOUS_INFRASTRUCTURE':
@@ -97,129 +117,54 @@ function archetypeVariant(value: string): 'neutral' | 'warning' | 'danger' | 'cr
     case 'COMPROMISED_ACCOUNT':
     case 'ANONYMIZED_INFRASTRUCTURE':
       return 'warning';
-    case 'INCONCLUSIVE':
     default:
       return 'neutral';
   }
 }
 
-/** Prompt 7 — compromiseTier is a NARROWER confidence label than the
- *  outer archetype badge, only meaningful when archetype ===
- *  'COMPROMISED_ACCOUNT'. LIKELY reads as 'warning'; POSSIBLE (the
- *  weaker, single-signal case) is deliberately a step down from that,
- *  never the same or a stronger color, so the UI doesn't visually
- *  overstate an uncorroborated single signal. CONFIRMED is included
- *  for completeness even though the backend documents that it is
- *  never actually emitted today. */
+/** compromiseTier is only meaningful for COMPROMISED_ACCOUNT. POSSIBLE
+ *  (the weaker single-signal case) is deliberately a step down from
+ *  LIKELY so an uncorroborated signal is never visually overstated. */
 function compromiseTierVariant(tier: string): 'neutral' | 'warning' | 'danger' {
   switch (tier) {
     case 'CONFIRMED':
       return 'danger';
     case 'LIKELY':
       return 'warning';
-    case 'POSSIBLE':
     default:
       return 'neutral';
   }
 }
 
-/** Prompt 10 — "unambiguous model/version display": expands the
- *  backend's internal model slug into the human-readable family name
- *  for display, without inventing or overriding the underlying value.
- *  Falls back to the raw slug for any value this mapping doesn't
- *  recognize (e.g. a future retrained/renamed model), so this never
- *  silently mislabels something it doesn't actually know about. */
-function formatModelName(slug: string | null): string {
-  if (!slug) return 'UNAVAILABLE';
-  const known: Record<string, string> = {
-    'tfidf-logistic-v1': 'TF-IDF + Logistic Regression',
-  };
-  return known[slug] ?? slug;
-}
-
-function statusColor(status: AvailabilityStatus): string {
-  switch (status) {
-    case 'Available':
-      return 'text-emerald-400';
-    case 'Inconclusive':
-      return 'text-amber-400';
-    case 'Unavailable':
-    default:
-      return 'text-ink-500';
-  }
-}
-
-function formatProbability(value: unknown): string {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return 'UNAVAILABLE';
-  }
-
-  // Backend normally uses 0–1 probability.
-  // Also tolerate 0–100 values without changing the meaning.
-  const percentage = value <= 1 ? value * 100 : value;
-
-  return `${Math.round(
-    Math.max(0, Math.min(100, percentage))
-  )}%`;
-}
-
-function formatRiskScore(value: unknown): string {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return 'UNAVAILABLE';
-  }
-
-  return `${Math.round(
-    Math.max(0, Math.min(100, value))
-  )}/100`;
-}
-
-function formatFraction(value: unknown): string {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return 'UNAVAILABLE';
-  }
-
-  return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
-}
-
-// Backend RiskCategory keys -> display labels, matching the taxonomy
-// used on the Reports page / backend riskEngine.ts. Kept local since
-// this is the only place on this page that needs the human-readable
-// label rather than the raw key.
-const CATEGORY_LABELS: Record<string, string> = {
-  technical: 'Technical Integrity',
-  identity: 'Identity Consistency',
-  urlDomain: 'URL / Domain Risk',
-  content: 'Content / Social Engineering',
-  infrastructure: 'Infrastructure Risk',
+const AVAILABILITY_TEXT: Record<AvailabilityStatus, string> = {
+  Available: 'text-emerald-400',
+  Inconclusive: 'text-amber-400',
+  Unavailable: 'text-ink-400',
 };
 
-// Prompt 9 — which risk categories are "technical/forensic" (about the
-// message's transport and structure) vs "content" (about what it says
-// and the AI's read of that) for the Technical vs Content comparison
-// panel. Purely a display grouping of the SAME five categories already
-// shown elsewhere on this page — no new computation.
-const TECHNICAL_CATEGORY_KEYS = ['technical', 'identity', 'urlDomain', 'infrastructure'];
-const CONTENT_CATEGORY_KEYS = ['content'];
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
 
-import { consolidateTopEvidencePoints } from '@/lib/evidenceConsolidation';
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string' && v.trim() !== '') : [];
+}
+
+// ---------------------------------------------------------------------
+// Page (data loading unchanged from Prompts 1-11)
+// ---------------------------------------------------------------------
 
 export function AIInvestigationPage() {
   const location = useLocation();
   const { setLastViewed, availableEmails, getEmail } = useActiveCase();
 
-  const [aiSelectedEmailId, setAiSelectedEmailId] =
-    useState<string | null>(
-      (location.state as { emailId?: string } | null)?.emailId ?? null
-    );
+  const [aiSelectedEmailId, setAiSelectedEmailId] = useState<string | null>(
+    (location.state as { emailId?: string } | null)?.emailId ?? null
+  );
 
-  const [activeEmailData, setActiveEmailData] =
-    useState<any | null>(null);
-
-  const [isLoadingDetails, setIsLoadingDetails] =
-    useState(false);
-
-  const [detailsError, setDetailsError] =
-    useState<string | null>(null);
+  const [activeEmailData, setActiveEmailData] = useState<any | null>(null);
+  const [isLoadingDetails, setIsLoadingDetails] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!aiSelectedEmailId) {
@@ -242,10 +187,9 @@ export function AIInvestigationPage() {
       .catch((err) => {
         if (!cancelled) {
           setDetailsError(
-            err instanceof Error
-              ? err.message
-              : 'Failed to load AI investigation details'
+            err instanceof Error ? err.message : 'Failed to load AI investigation details'
           );
+          setActiveEmailData(null);
         }
       })
       .finally(() => {
@@ -272,33 +216,16 @@ export function AIInvestigationPage() {
   // Use the real, already-fetched lightweight record from availableEmails —
   // never a fabricated stub — so InvestigationShell/CaseSelector always
   // receive a complete ScannedEmail (or null, which they render safely).
-const headerEmailContext = activeEmailData
-    ? getEmail(activeEmailData.emailId)
-    : null;
+  const headerEmailContext = activeEmailData ? getEmail(activeEmailData.emailId) : null;
 
   return (
     <InvestigationShell
       breadcrumb="AI Investigation"
       title="AI Investigation"
-      subtitle={
-        activeEmailData
-          ? `Model-assisted analysis · ${activeEmailData.emailId}`
-          : undefined
-      }
-      actions={
-        activeEmailData ? (
-          <Badge
-            variant={
-              typeof activeEmailData.risk?.score === 'number' &&
-              activeEmailData.risk.score >= 60
-                ? 'danger'
-                : 'neutral'
-            }
-          >
-            {activeEmailData.risk?.classification || 'Unknown'}
-          </Badge>
-        ) : undefined
-      }
+      // Once an email is open the page renders its own compact header card
+      // (subject, sender, score, classification), so the generic page
+      // heading and its duplicate classification badge are omitted.
+      compactHeading={!!activeEmailData}
       hideCaseSelector={!activeEmailData}
       selectedEmail={headerEmailContext}
       availableEmails={availableEmails}
@@ -323,9 +250,7 @@ const headerEmailContext = activeEmailData
         </div>
       ) : !activeEmailData ? (
         <InvestigationWorkspace
-          onInvestigate={(email: any) =>
-            handleInvestigate(email.id)
-          }
+          onInvestigate={(email: any) => handleInvestigate(email.id)}
           renderPreview={renderAIPreview}
           enableCaseFilter
         />
@@ -336,965 +261,987 @@ const headerEmailContext = activeEmailData
   );
 }
 
-function AIInvestigationDetail({
-  emailData,
-}: {
-  emailData: any;
-}) {
-  // The stored EmailRecord nests the deterministic risk assessment
-  // under `risk` (RiskAssessment: score/level/classification/
-  // confidence/evidenceCoverage/categoryScores) — it is never a
-  // top-level `score`/`level`/`classification` on the record itself.
-  // Reading those top-level fields (as this page previously did) is
-  // exactly why this page showed UNAVAILABLE while the Reports page
-  // (which reads report.threatAssessment, sourced from the same
-  // `risk` object) showed real values.
+// ---------------------------------------------------------------------
+// Detail view
+// ---------------------------------------------------------------------
+
+function AIInvestigationDetail({ emailData }: { emailData: any }) {
+  // The stored EmailRecord nests the deterministic risk assessment under
+  // `risk` (score/level/classification/confidence/evidenceCoverage/
+  // categoryScores) — never as top-level fields on the record itself.
   const risk = emailData.risk ?? {};
 
-  const threatScore =
-    typeof risk.score === 'number'
-      ? risk.score
-      : null;
-
-  const riskLevel = String(
-    risk.level ?? 'UNKNOWN'
-  ).toUpperCase();
-
-  const classification =
-    risk.classification || 'Unknown';
-
-  const riskConfidence = risk.confidence;
-  const evidenceCoverage = risk.evidenceCoverage;
-  const categoryScores: Record<string, { score: number | null; status: string }> | null =
-    risk.categoryScores ?? null;
+  const threatScore = asScore(risk.score);
+  const riskLevel = String(risk.level ?? 'UNKNOWN').toUpperCase();
+  const classification: string = risk.classification || 'Unknown';
+  const riskConfidencePct = fractionToPercent(risk.confidence);
+  const coveragePct = fractionToPercent(risk.evidenceCoverage);
+  const categoryScores: CategoryScores | null = risk.categoryScores ?? null;
   const riskStatus = normalizeAvailability(
     threatScore !== null ? 'AVAILABLE' : risk.status ?? 'UNAVAILABLE'
   );
 
-  // Frontend F4 correction — Backend Batch 4 has landed. The real field
-  // is `archetype`, a sibling of `recommendations` on the email detail
-  // response (see routes/emails.ts: `{ ...toPublicEmailRecord(record),
-  // recommendations, archetype }`) — NOT `archetypeAssessment`, which
-  // was this file's original unverified guess. The object itself is
-  // { archetype: AttackArchetype, basis: string[], confidence } — note
-  // the inner field is also named `archetype`, which is why the local
-  // variable below is named `archetypeResult` rather than shadowing it.
+  // `archetype` is a sibling of `recommendations` on the email detail
+  // response; the object is { archetype, basis, confidence, compromiseTier? }
+  // and its inner field is also called `archetype`, hence the local name.
   const archetypeResult = emailData.archetype ?? {};
-  const archetype: string | null = archetypeResult.archetype ?? null;
-  const archetypeBasis: string[] = Array.isArray(archetypeResult.basis)
-    ? archetypeResult.basis
-    : [];
-  const archetypeConfidence: string | null =
-    archetypeResult.confidence ?? null;
-  // Prompt 7 — only meaningful when archetype === 'COMPROMISED_ACCOUNT';
-  // undefined for every other archetype, exactly as the backend documents.
-  const compromiseTier: string | null = archetypeResult.compromiseTier ?? null;
+  const archetype: string | null = nonEmptyString(archetypeResult.archetype);
+  const archetypeBasis = stringList(archetypeResult.basis);
+  const archetypeConfidence = nonEmptyString(archetypeResult.confidence);
+  const compromiseTier = nonEmptyString(archetypeResult.compromiseTier);
 
-  const mlAssessment =
-    emailData.mlAssessment ?? {};
+  const mlAssessment = emailData.mlAssessment ?? {};
+  const aiAssessment = emailData.aiAssessment ?? {};
+  const mlStatus = normalizeAvailability(mlAssessment.status);
+  const aiStatus = normalizeAvailability(aiAssessment.status);
+  const mlProbabilityPct = probabilityToPercent(mlAssessment.probability);
+  const mlClassification = nonEmptyString(mlAssessment.classification);
 
-  const aiAssessment =
-    emailData.aiAssessment ?? {};
+  const iocs = emailData.iocs ?? {};
+  const ips = stringList(iocs.ips);
+  const domains = stringList(iocs.domains);
 
-  const mlStatus = normalizeAvailability(
-    mlAssessment.status
-  );
+  const spfResult = String(emailData.authentication?.spf?.result ?? 'unknown').toLowerCase();
+  const dkimResult = String(emailData.authentication?.dkim?.result ?? 'unknown').toLowerCase();
+  const dmarcResult = String(emailData.authentication?.dmarc?.result ?? 'unknown').toLowerCase();
 
-  const aiStatus = normalizeAvailability(
-    aiAssessment.status
-  );
-
-  const mlProbabilityLabel = formatProbability(
-    mlAssessment.probability
-  );
-
-  const ips = Array.isArray(emailData.iocs?.ips)
-    ? emailData.iocs.ips
-    : [];
-
-  const domains = Array.isArray(
-    emailData.iocs?.domains
-  )
-    ? emailData.iocs.domains
-    : [];
-
-  const ipDomainIndicatorCount =
-    ips.length + domains.length;
-
-  const spfResult = String(
-    emailData.authentication?.spf?.result ?? 'unknown'
-  ).toLowerCase();
-
-  const dkimResult = String(
-    emailData.authentication?.dkim?.result ?? 'unknown'
-  ).toLowerCase();
-
-  const dmarcResult = String(
-    emailData.authentication?.dmarc?.result ?? 'unknown'
-  ).toLowerCase();
-
-  const explanations = Array.isArray(
-    emailData.explanations
-  )
-    ? emailData.explanations
-    : [];
-
-  const whyFlagged = explanations
-    .map((item: any) => item?.message)
-    .filter(
-      (value: unknown): value is string =>
-        typeof value === 'string' &&
-        value.trim().length > 0
-    );
-
-  const aiSummary =
-    typeof aiAssessment.summary === 'string' &&
-    aiAssessment.summary.trim().length > 0
-      ? aiAssessment.summary
-      : 'UNAVAILABLE';
-
-  const attackType =
-    typeof aiAssessment.attackType === 'string' &&
-    aiAssessment.attackType.trim().length > 0
-      ? aiAssessment.attackType
-      : 'UNAVAILABLE';
-
-  const recommendedActions = Array.isArray(
-    aiAssessment.recommendedActions
-  )
-    ? aiAssessment.recommendedActions
-    : [];
-
-  // Prompt 6 fields — additive, read defensively (older stored records
-  // predate these and simply won't have them).
-  const aiConcernLevel: string | null =
-    typeof aiAssessment.concernLevel === 'string' ? aiAssessment.concernLevel : null;
-  const aiTopReasons: string[] = Array.isArray(aiAssessment.topReasons) ? aiAssessment.topReasons : [];
-  const aiBenignExplanation: string | null =
-    typeof aiAssessment.benignExplanation === 'string' && aiAssessment.benignExplanation.trim().length > 0
-      ? aiAssessment.benignExplanation
-      : null;
-  const aiConfidence: string | null =
-    typeof aiAssessment.confidence === 'string' ? aiAssessment.confidence : null;
-
-  // Prompt 9, requirement: "Repeated identical observations should be
-  // grouped" + "Top 3-5 evidence points". Consolidates the deterministic
-  // explanation list with the AI's own (already-consolidated, per
-  // Prompt 6's prompt instructions) topReasons into ONE deduplicated
-  // list, capped at 5. Dedup is exact-string on the trimmed message —
-  // this does not re-interpret or re-score anything, it only prevents
-  // the same sentence appearing twice when both the deterministic
-  // evidence and the AI summary happen to describe the same finding in
-  // the same words.
-  const topEvidencePoints: string[] = consolidateTopEvidencePoints(whyFlagged, aiTopReasons);
-
-  const [showDetails, setShowDetails] = useState(false);
+  const dims = resolveRiskDimensions({ score: risk.score, categoryScores });
 
   return (
-    <div
-      key={emailData.emailId}
-      className="space-y-5 animate-fade-in"
-    >
-      {/* ==================== 1. EXECUTIVE VERDICT ==================== */}
-      <ExecutiveVerdict
-        riskStatus={riskStatus}
+    <div key={emailData.emailId} className="space-y-3 animate-fade-in">
+      <InvestigationHeader
+        emailData={emailData}
         threatScore={threatScore}
         riskLevel={riskLevel}
         classification={classification}
-        archetype={archetype}
-        compromiseTier={compromiseTier}
       />
 
-      <div className="grid grid-cols-12 gap-5">
-        <Card className="col-span-4 flex flex-col items-center justify-center py-8 min-h-[300px] relative overflow-hidden">
-          <div className="absolute top-0 left-0 right-0 flex items-center justify-center gap-2 pt-4">
-            <SectionLabel>
-              Deterministic Threat Assessment
-            </SectionLabel>
-            <ProvenanceTag type="deterministic" />
-          </div>
+      <RiskEngineSection
+        riskStatus={riskStatus}
+        score={threatScore}
+        level={riskLevel}
+        confidencePct={riskConfidencePct}
+        coveragePct={coveragePct}
+        categoryScores={categoryScores}
+      />
 
-          {riskStatus === 'Available' &&
-          threatScore !== null ? (
-            <ThreatRing
-              mode="result"
-              score={threatScore}
-              riskLevel={riskLevel}
-              threatType={classification}
-              size={220}
-            />
-          ) : (
-            <UnavailablePanel
-              status={riskStatus}
-              label="Threat assessment"
-            />
-          )}
-        </Card>
+      <RiskDimensionsSection dims={dims} />
 
-        <div className="col-span-8 space-y-5">
-          {/* ==================== 2. TOP EVIDENCE POINTS ==================== */}
-          <TopEvidencePoints points={topEvidencePoints} />
-
-          {/* ==================== 3. TECHNICAL vs CONTENT ASSESSMENT ==================== */}
-          <TechnicalVsContentAssessment
-            categoryScores={categoryScores}
-            aiStatus={aiStatus}
-            aiConcernLevel={aiConcernLevel}
-            aiBenignExplanation={aiBenignExplanation}
-          />
-        </div>
-      </div>
-
-      {/* ==================== 4. ATTACK STORY ==================== */}
-      {archetype && (
-        <AttackStorySummary
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 items-stretch">
+        <ArchetypeSection
           archetype={archetype}
-          archetypeConfidence={archetypeConfidence}
+          confidence={archetypeConfidence}
           compromiseTier={compromiseTier}
           basis={archetypeBasis}
-          attackType={attackType}
         />
-      )}
+        <MlSection
+          status={mlStatus}
+          classification={mlClassification}
+          modelName={formatModelName(nonEmptyString(mlAssessment.model))}
+          modelVersion={nonEmptyString(mlAssessment.modelVersion)}
+          tokenizer={nonEmptyString(mlAssessment.tokenizer)}
+          probabilityPct={mlProbabilityPct}
+        />
+      </div>
 
-      {/* ==================== 5. CONFIDENCE ==================== */}
-      <ConfidencePanel
-        riskConfidence={riskConfidence}
-        evidenceCoverage={evidenceCoverage}
-        archetypeConfidence={archetypeConfidence}
-        aiConfidence={aiConfidence}
+      <AiSection
+        status={aiStatus}
+        aiAssessment={aiAssessment}
+        concernLevel={nonEmptyString(aiAssessment.concernLevel)}
+        confidence={nonEmptyString(aiAssessment.confidence)}
       />
 
-      {/* ==================== 6. EXPANDABLE DETAILED ANALYSIS ==================== */}
-      <button
-        type="button"
-        onClick={() => setShowDetails((v) => !v)}
-        className="w-full flex items-center justify-center gap-2 py-2.5 text-[12px] font-semibold uppercase tracking-wider text-ink-400 hover:text-ink-200 transition-colors border border-base-500/20 rounded-lg hover:border-base-500/40"
-      >
-        {showDetails ? (
-          <>
-            <ChevronUp className="w-3.5 h-3.5" /> Hide Detailed Analysis
-          </>
-        ) : (
-          <>
-            <ChevronDown className="w-3.5 h-3.5" /> Show Detailed Analysis
-          </>
-        )}
-      </button>
+      <TechnicalEvidenceSection
+        spf={spfResult}
+        dkim={dkimResult}
+        dmarc={dmarcResult}
+        ipCount={ips.length}
+        domainCount={domains.length}
+      />
 
-      {showDetails && (
-        <div className="space-y-5 animate-fade-in">
-          {/* Technical Evidence */}
-          <Card className="p-5">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <FlaskConical className="w-3.5 h-3.5 text-accent-500" />
-                <SectionLabel>
-                  Technical Evidence
-                </SectionLabel>
-              </div>
-
-              <ProvenanceTag type="observed" />
-            </div>
-
-            <div className="grid grid-cols-4 gap-3 mb-4">
-              <SignalStat
-                label="IP / Domain Indicators"
-                value={ipDomainIndicatorCount}
-                danger={ipDomainIndicatorCount > 0}
-              />
-
-              <SignalStat
-                label="SPF"
-                value={spfResult.toUpperCase()}
-                danger={
-                  spfResult === 'fail' ||
-                  spfResult === 'softfail'
-                }
-              />
-
-              <SignalStat
-                label="DKIM"
-                value={dkimResult.toUpperCase()}
-                danger={
-                  dkimResult === 'fail' ||
-                  dkimResult === 'softfail'
-                }
-              />
-
-              <SignalStat
-                label="DMARC"
-                value={dmarcResult.toUpperCase()}
-                danger={
-                  dmarcResult === 'fail' ||
-                  dmarcResult === 'softfail'
-                }
-              />
-            </div>
-
-            <p className="text-[11px] text-ink-500 leading-relaxed">
-              SPF: {spfResult}, DKIM: {dkimResult}, DMARC:{' '}
-              {dmarcResult}
-            </p>
-
-            <p className="text-[10px] text-ink-600 mt-2 italic">
-              Technical evidence is derived from the scanned
-              email and deterministic analysis. ML and AI
-              sections interpret this evidence; they are not the
-              source of the underlying technical facts.
-            </p>
-          </Card>
-
-          {/* Risk Engine Breakdown */}
-          <Card className="p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <SectionLabel>
-                  Risk Engine Breakdown
-                </SectionLabel>
-                <ProvenanceTag type="deterministic" />
-              </div>
-
-              <span
-                className={cn(
-                  'text-[10px] font-bold uppercase tracking-wider',
-                  statusColor(riskStatus)
-                )}
-              >
-                Status: {riskStatus}
-              </span>
-            </div>
-
-            {riskStatus === 'Available' ? (
-              <>
-                <div className="grid grid-cols-4 gap-3 mb-3">
-                  <PreviewField
-                    label="Overall Risk Score"
-                    value={formatRiskScore(threatScore)}
-                    mono
-                  />
-                  <PreviewField
-                    label="Risk Level"
-                    value={riskLevel}
-                  />
-                  <PreviewField
-                    label="Risk Confidence"
-                    value={formatFraction(riskConfidence)}
-                    mono
-                  />
-                  <PreviewField
-                    label="Evidence Coverage"
-                    value={formatFraction(evidenceCoverage)}
-                    mono
-                  />
-                </div>
-
-                {categoryScores && (
-                  <div className="grid grid-cols-5 gap-2">
-                    {Object.entries(categoryScores).map(
-                      ([category, result]) => (
-                        <div
-                          key={category}
-                          className="panel-2 p-2.5 text-center"
-                        >
-                          <div className="text-[8px] uppercase tracking-wider text-ink-500 mb-1 leading-tight">
-                            {CATEGORY_LABELS[category] ?? category}
-                          </div>
-                          <div className="text-[13px] font-bold text-ink-200">
-                            {result?.score ?? '—'}
-                          </div>
-                          <div className="text-[8px] text-ink-600 mt-0.5">
-                            {result?.status ?? 'UNAVAILABLE'}
-                          </div>
-                        </div>
-                      )
-                    )}
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="text-[12px] text-ink-500 italic">
-                Insufficient evidence to compute a deterministic
-                threat score for this email.
-              </div>
-            )}
-          </Card>
-
-          {/* ML model output */}
-          <Card className="p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <SectionLabel>
-                  ML Assessment
-                </SectionLabel>
-                <ProvenanceTag type="ml" />
-              </div>
-
-              <span
-                className={cn(
-                  'text-[10px] font-bold uppercase tracking-wider',
-                  statusColor(mlStatus)
-                )}
-              >
-                Model Status: {mlStatus}
-              </span>
-            </div>
-
-            {mlStatus === 'Available' ? (
-              <div className="grid grid-cols-5 gap-3">
-                <PreviewField
-                  label="ML Classification"
-                  value={mlAssessment.classification || 'UNAVAILABLE'}
-                />
-
-                <PreviewField
-                  label="Model"
-                  value={formatModelName(mlAssessment.model)}
-                />
-
-                <PreviewField
-                  label="Version"
-                  value={mlAssessment.modelVersion || 'UNAVAILABLE'}
-                  mono
-                />
-
-                <PreviewField
-                  label="Tokenization"
-                  value={mlAssessment.tokenizer || 'UNAVAILABLE'}
-                  mono
-                />
-
-                <PreviewField
-                  label="ML Probability (model output)"
-                  value={mlProbabilityLabel}
-                  mono
-                  valueClassName={
-                    mlProbabilityLabel !==
-                    'UNAVAILABLE'
-                      ? 'text-accent-400'
-                      : 'text-ink-500'
-                  }
-                />
-              </div>
-            ) : (
-              <div className="text-[12px] text-ink-500 italic">
-                ML assessment{' '}
-                {mlStatus.toLowerCase()} for this
-                email.
-              </div>
-            )}
-
-            <p className="text-[10px] text-ink-600 mt-3 italic">
-              ML probability is a model output, not the final threat
-              score. The deterministic risk engine (above) is the
-              source of the overall risk score and classification.
-            </p>
-          </Card>
-
-          {/* Semantic Content Assessment (Prompt 6 terminology) */}
-          <Card className="p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <Brain className="w-3.5 h-3.5 text-amber-400" />
-                <SectionLabel>
-                  Semantic Content Assessment
-                </SectionLabel>
-                <ProvenanceTag type="ai" />
-              </div>
-
-              <span
-                className={cn(
-                  'text-[10px] font-bold uppercase tracking-wider',
-                  statusColor(aiStatus)
-                )}
-              >
-                AI Status: {aiStatus}
-              </span>
-            </div>
-
-            <p className="text-[10px] text-ink-600 mb-3 italic">
-              A separate, secondary content signal — not the authoritative
-              overall verdict. Score, level, and classification above come
-              from the deterministic risk engine only.
-            </p>
-
-            {aiStatus === 'Available' ? (
-              <>
-                <div className="grid grid-cols-5 gap-2 mb-4">
-                  {TECHNIQUE_FLAGS.map((flag) => {
-                    const keyMap: Record<
-                      (typeof TECHNIQUE_FLAGS)[number],
-                      string
-                    > = {
-                      'Phishing Intent':
-                        'phishingIntent',
-                      'Credential Harvesting':
-                        'credentialHarvesting',
-                      Impersonation:
-                        'impersonation',
-                      'Financial Fraud':
-                        'financialFraud',
-                      'Social Engineering':
-                        'socialEngineering',
-                    };
-
-                    const rawValue =
-                      aiAssessment[keyMap[flag]];
-
-                    const value =
-                      typeof rawValue === 'number'
-                        ? formatProbability(rawValue)
-                        : 'UNAVAILABLE';
-
-                    return (
-                      <div
-                        key={flag}
-                        className="panel-2 p-2.5 text-center"
-                      >
-                        <div className="text-[8px] text-ink-600 uppercase tracking-wider">
-                          {flag}
-                        </div>
-
-                        <div
-                          className={cn(
-                            'text-sm font-bold mt-1',
-                            value === 'UNAVAILABLE'
-                              ? 'text-ink-600'
-                              : 'text-accent-400'
-                          )}
-                        >
-                          {value}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="grid grid-cols-2 gap-3 mb-4">
-                  <PreviewField
-                    label="Attack Type"
-                    value={attackType}
-                  />
-
-                  <PreviewField
-                    label="Concern Level"
-                    value={aiConcernLevel ?? 'UNAVAILABLE'}
-                  />
-                </div>
-
-                <SectionLabel className="block mb-2">
-                  AI Summary
-                </SectionLabel>
-
-                <p className="text-sm text-ink-300 leading-relaxed mb-4">
-                  {aiSummary}
-                </p>
-
-                {aiBenignExplanation && (
-                  <div className="mb-4 panel-2 p-3">
-                    <div className="text-[10px] uppercase tracking-wider text-ink-500 mb-1">
-                      Benign Contextual Explanation
-                    </div>
-                    <p className="text-[12px] text-ink-300 leading-relaxed">{aiBenignExplanation}</p>
-                  </div>
-                )}
-
-                {whyFlagged.length > 0 && (
-                  <>
-                    <div className="flex items-center gap-2 mb-2">
-                      <Sparkles className="w-3.5 h-3.5 text-accent-500" />
-                      <SectionLabel>
-                        Supporting / Semantic Reasons
-                      </SectionLabel>
-                    </div>
-
-                    <ul className="space-y-2 mb-4">
-                      {whyFlagged.map(
-                        (
-                          reason: string,
-                          index: number
-                        ) => (
-                          <li
-                            key={index}
-                            className="flex items-start gap-2.5 text-[13px] text-ink-300 leading-relaxed"
-                          >
-                            <span className="mono text-[10px] text-accent-600 mt-0.5 shrink-0">
-                              {String(
-                                index + 1
-                              ).padStart(2, '0')}
-                            </span>
-
-                            <span>{reason}</span>
-                          </li>
-                        )
-                      )}
-                    </ul>
-                  </>
-                )}
-
-                <div className="flex items-center gap-2 mb-2">
-                  <ListChecks className="w-3.5 h-3.5 text-accent-500" />
-                  <SectionLabel>
-                    Recommended Actions
-                  </SectionLabel>
-                </div>
-
-                {recommendedActions.length > 0 ? (
-                  <ul className="space-y-1.5">
-                    {recommendedActions.map(
-                      (
-                        action: any,
-                        index: number
-                      ) => (
-                        <li
-                          key={index}
-                          className="text-[13px] text-ink-300 flex items-start gap-2"
-                        >
-                          <span className="text-accent-500">
-                            •
-                          </span>
-
-                          <span>
-                            {typeof action ===
-                            'string'
-                              ? action
-                              : action?.action ||
-                                action?.reason ||
-                                'UNAVAILABLE'}
-                          </span>
-                        </li>
-                      )
-                    )}
-                  </ul>
-                ) : (
-                  <div className="text-[12px] text-ink-600 italic">
-                    No recommended actions available
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="text-[12px] text-ink-500 italic">
-                AI interpretation{' '}
-                {aiStatus.toLowerCase()} for this
-                email.
-              </div>
-            )}
-          </Card>
-        </div>
-      )}
+      <DetailedAnalysisSection
+        emailId={emailData.emailId}
+        explanations={Array.isArray(emailData.explanations) ? emailData.explanations : []}
+        categoryScores={categoryScores}
+        aiStatus={aiStatus}
+        aiAssessment={aiAssessment}
+        iocs={{
+          ips,
+          domains,
+          urls: stringList(iocs.urls),
+          emails: stringList(iocs.emails),
+          hashes: stringList(iocs.hashes),
+        }}
+      />
 
       <p className="text-[10px] text-ink-600 italic text-center pt-1">
-        Threat scores are analytical risk assessments and are not legal
-        conclusions or definitive attacker attribution.
+        Threat scores are analytical risk assessments and are not legal conclusions or definitive attacker
+        attribution.
       </p>
     </div>
   );
 }
 
-/** 1. Executive verdict — the single, plain-language statement at the
- *  top of the page. Reads exactly the same score/level/classification/
- *  archetype/compromiseTier values shown elsewhere; does not compute
- *  anything new. */
-function ExecutiveVerdict({
-  riskStatus,
+// ---------------------------------------------------------------------
+// 1. Header
+// ---------------------------------------------------------------------
+
+function InvestigationHeader({
+  emailData,
   threatScore,
   riskLevel,
   classification,
-  archetype,
-  compromiseTier,
 }: {
-  riskStatus: AvailabilityStatus;
+  emailData: any;
   threatScore: number | null;
   riskLevel: string;
   classification: string;
-  archetype: string | null;
-  compromiseTier: string | null;
 }) {
-  return (
-    <Card className="p-5">
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
-          <Gauge className="w-3.5 h-3.5 text-accent-500" />
-          <SectionLabel>Executive Verdict</SectionLabel>
-          <ProvenanceTag type="deterministic" />
-        </div>
-        {archetype && (
-          <div className="flex items-center gap-1.5">
-            <Badge variant={archetypeVariant(archetype)}>{archetypeLabel(archetype)}</Badge>
-            {compromiseTier && (
-              <Badge variant={compromiseTierVariant(compromiseTier)}>{compromiseTier}</Badge>
-            )}
-          </div>
-        )}
-      </div>
+  // Reuses the app's canonical classification -> status mapping
+  // (emailMapper) rather than re-deriving a verdict here.
+  const ui = mapApiEmailToUiEmail(emailData);
+  const statusVariant = (
+    { safe: 'success', suspicious: 'warning', malicious: 'danger', inconclusive: 'neutral' } as const
+  )[ui.status];
+  const iconTone = {
+    safe: 'border-emerald-700/40 bg-emerald-900/15 text-emerald-400',
+    suspicious: 'border-amber-700/40 bg-amber-900/15 text-amber-400',
+    malicious: 'border-accent-700/40 bg-accent-900/20 text-accent-400',
+    inconclusive: 'border-base-400/40 bg-base-600/40 text-ink-400',
+  }[ui.status];
 
-      {riskStatus === 'Available' && threatScore !== null ? (
-        <p className="text-[15px] text-ink-100 leading-relaxed">
-          This email is classified <span className="font-bold">{String(classification).toUpperCase()}</span> with a{' '}
-          <span className="font-bold">{riskLevel}</span> risk level, scoring{' '}
-          <span className="mono font-bold">{formatRiskScore(threatScore)}</span>.
-        </p>
-      ) : (
-        <p className="text-[13px] text-ink-500 italic">
-          Insufficient evidence to compute a deterministic verdict for this email.
-        </p>
-      )}
+  const forwarding = emailData.forwarding;
+  const isForwarded = forwarding?.isForwarded === true;
+  const originalSender =
+    forwarding?.originalSender && typeof forwarding.originalSender === 'object'
+      ? nonEmptyString(forwarding.originalSender.email)
+      : forwarding?.originalSender === 'UNKNOWN'
+        ? 'unknown'
+        : null;
+
+  const collected = formatUtcTimestamp(emailData.evidence?.createdAt);
+  const dateHeader = formatUtcTimestamp(ui.date);
+
+  const tone = levelTone(riskLevel);
+
+  return (
+    <Card className="p-4">
+      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+        <div className="flex items-start gap-3.5 min-w-0 flex-1 basis-[20rem]">
+          <div
+            className={cn(
+              'flex items-center justify-center w-12 h-12 rounded-xl border shrink-0',
+              iconTone
+            )}
+          >
+            <Mail aria-hidden="true" className="w-6 h-6" />
+          </div>
+
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+              <h2 className="text-lg font-semibold leading-snug text-ink-50 break-words min-w-0">
+                {ui.subject || '(No subject)'}
+              </h2>
+              <Badge variant={statusVariant}>{String(classification).toUpperCase()}</Badge>
+              {isForwarded && (
+                <Badge variant="neutral" className="cursor-help">
+                  <span title="This message was forwarded; the From address is the forwarder.">Forwarded</span>
+                </Badge>
+              )}
+            </div>
+
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[12px] text-ink-400">
+              <span className="min-w-0 break-all">
+                From: <span className="text-sky-500">{ui.sender || 'Unknown sender'}</span>
+              </span>
+              <span aria-hidden="true" className="text-ink-700">|</span>
+              <span className="min-w-0 break-all">To: {ui.recipient || 'unknown'}</span>
+              {isForwarded && originalSender && (
+                <>
+                  <span aria-hidden="true" className="text-ink-700">|</span>
+                  <span className="min-w-0 break-all">Original sender: {originalSender}</span>
+                </>
+              )}
+            </div>
+
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[12px] text-ink-400 mono">
+              <span className="break-all">Email ID: {emailData.emailId}</span>
+              {collected && (
+                <>
+                  <span aria-hidden="true" className="text-ink-700">|</span>
+                  <span>Collected: {collected}</span>
+                </>
+              )}
+              {dateHeader && dateHeader !== collected && (
+                <>
+                  <span aria-hidden="true" className="text-ink-700">|</span>
+                  <span>Date header: {dateHeader}</span>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="panel-2 px-6 py-3 text-center shrink-0 min-w-[9.5rem]">
+          {threatScore !== null ? (
+            <>
+              <div className="tabular-nums leading-none">
+                <span className="text-3xl font-bold text-ink-50">{threatScore}</span>
+                <span className="text-lg text-ink-400"> / 100</span>
+              </div>
+              <div className={cn('mt-1.5 text-[15px] font-bold uppercase tracking-wide', LEVEL_TEXT[tone])}>
+                {tone === 'unknown' ? 'No risk level' : `${riskLevel} RISK`}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="text-3xl font-bold leading-none text-ink-500">—</div>
+              <div className="mt-1.5 text-[12px] font-bold uppercase tracking-wide text-ink-400">
+                Score unavailable
+              </div>
+            </>
+          )}
+        </div>
+      </div>
     </Card>
   );
 }
 
-/** 2. Top 3-5 evidence points — already deduplicated/consolidated (see
- *  AIInvestigationDetail's topEvidencePoints derivation above). This
- *  component only renders; it performs no grouping of its own. */
-function TopEvidencePoints({ points }: { points: string[] }) {
+// ---------------------------------------------------------------------
+// 2. Risk Engine Breakdown
+// ---------------------------------------------------------------------
+
+const CATEGORY_ICON: Record<string, { icon: typeof User; color: string }> = {
+  technical: { icon: ShieldCheck, color: 'text-teal-400' },
+  identity: { icon: User, color: 'text-sky-400' },
+  urlDomain: { icon: Link2, color: 'text-indigo-400' },
+  content: { icon: FileText, color: 'text-fuchsia-400' },
+  infrastructure: { icon: Server, color: 'text-cyan-400' },
+};
+
+function MetricCell({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <Card className="p-5">
-      <div className="flex items-center gap-2 mb-3">
-        <Sparkles className="w-3.5 h-3.5 text-accent-500" />
-        <SectionLabel>Top Evidence Points</SectionLabel>
+    <div className="panel-2 px-3.5 py-2.5 min-w-0">
+      <div className="text-[12px] text-ink-400 truncate">{label}</div>
+      <div className="mt-0.5 text-xl font-bold leading-tight tabular-nums text-ink-50">{children}</div>
+    </div>
+  );
+}
+
+function RiskEngineSection({
+  riskStatus,
+  score,
+  level,
+  confidencePct,
+  coveragePct,
+  categoryScores,
+}: {
+  riskStatus: AvailabilityStatus;
+  score: number | null;
+  level: string;
+  confidencePct: number | null;
+  coveragePct: number | null;
+  categoryScores: CategoryScores | null;
+}) {
+  const tone = levelTone(level);
+  const scoreAvailable = riskStatus === 'Available' && score !== null;
+
+  return (
+    <SectionPanel
+      icon={<ShieldCheck aria-hidden="true" className="w-5 h-5 text-sky-400" />}
+      title="Risk Engine Breakdown"
+      tag={<ProvenanceTag type="deterministic" />}
+      explainSide
+      explanation={explainRiskEngine({
+        score: scoreAvailable ? score : null,
+        level,
+        confidencePct,
+        coveragePct,
+        categoryScores,
+      })}
+    >
+      <div className="space-y-2">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+          <MetricCell label="Overall Risk Score">
+            {scoreAvailable ? (
+              <>
+                <span className={LEVEL_TEXT[tone]}>{score}</span>
+                <span className="text-ink-300"> / 100</span>
+              </>
+            ) : (
+              <span className="text-ink-500">N/A</span>
+            )}
+          </MetricCell>
+          <MetricCell label="Risk Level">
+            <span className={LEVEL_TEXT[tone]}>{tone === 'unknown' ? 'N/A' : level}</span>
+          </MetricCell>
+          <MetricCell label="Risk Confidence">
+            {confidencePct !== null ? `${confidencePct}%` : <span className="text-ink-500">N/A</span>}
+          </MetricCell>
+          <MetricCell label="Evidence Coverage">
+            {coveragePct !== null ? `${coveragePct}%` : <span className="text-ink-500">N/A</span>}
+          </MetricCell>
+        </div>
+
+        {categoryScores && (
+          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2">
+            {orderedCategoryKeys(categoryScores).map((key) => {
+              const value = usableCategoryScore(categoryScores[key]);
+              const meta = CATEGORY_ICON[key];
+              const Icon = meta?.icon ?? FileText;
+              return (
+                <div key={key} className="panel-2 px-3 py-2.5 min-w-0">
+                  <div className="flex items-start gap-2">
+                    <Icon aria-hidden="true" className={cn('w-4 h-4 mt-0.5 shrink-0', meta?.color ?? 'text-ink-400')} />
+                    <div className="text-[12px] leading-tight text-ink-400">{CATEGORY_LABELS[key] ?? key}</div>
+                  </div>
+                  <div className="mt-1.5 flex items-end justify-between gap-2">
+                    <div
+                      className={cn(
+                        'text-xl font-bold leading-none tabular-nums',
+                        value === null ? 'text-ink-500' : 'text-ink-50'
+                      )}
+                    >
+                      {value === null ? 'N/A' : value}
+                    </div>
+                    {value === null && (
+                      <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-500">Unavailable</div>
+                    )}
+                  </div>
+                  <div className="mt-2 h-1 rounded-full bg-base-500/40 overflow-hidden" aria-hidden="true">
+                    <div className="h-full rounded-full bg-sky-400/70" style={{ width: `${value ?? 0}%` }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {!scoreAvailable && (
+          <p className="text-[12px] text-ink-500 italic">
+            Insufficient evidence to compute a deterministic threat score for this email.
+          </p>
+        )}
       </div>
-      {points.length > 0 ? (
-        <ul className="space-y-2">
-          {points.map((point, index) => (
-            <li key={index} className="flex items-start gap-2.5 text-[13px] text-ink-300 leading-relaxed">
-              <span className="mono text-[10px] text-accent-600 mt-0.5 shrink-0">{String(index + 1).padStart(2, '0')}</span>
-              <span>{point}</span>
+    </SectionPanel>
+  );
+}
+
+// ---------------------------------------------------------------------
+// 3. 3D Risk Analysis
+// ---------------------------------------------------------------------
+
+function RiskDimensionsSection({ dims }: { dims: ResolvedRiskDimensions }) {
+  const rows = [dims.overall, dims.forensic, dims.content];
+
+  return (
+    <SectionPanel
+      icon={<Box aria-hidden="true" className="w-5 h-5 text-sky-400" />}
+      title="3D Risk Analysis"
+      explainSide
+      explanation={explainRiskDimensions(dims)}
+    >
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)] items-center">
+        <RiskRadar dims={dims} />
+
+        <ul className="space-y-2 min-w-0" aria-label="Risk dimension values">
+          {rows.map((d) => (
+            <li key={d.key} className="panel-2 flex items-center gap-3 px-3.5 py-2.5">
+              <span
+                aria-hidden="true"
+                className="w-2.5 h-2.5 rounded-full shrink-0"
+                style={{ backgroundColor: DIMENSION_COLORS[d.key] }}
+              />
+              <div className="min-w-0 flex-1">
+                <div className="text-[13px] text-ink-200">{d.label}</div>
+                <div className="text-[10px] leading-snug text-ink-500">
+                  {d.value === null ? 'No reliable assessment was returned for this dimension.' : d.basis}
+                </div>
+              </div>
+              {d.value === null ? (
+                <span className="text-[11px] font-bold uppercase tracking-wider text-ink-400 shrink-0">
+                  Unavailable
+                </span>
+              ) : (
+                <span className="text-[15px] font-bold tabular-nums text-ink-50 shrink-0">
+                  {d.value} <span className="text-ink-400 font-semibold">/ 100</span>
+                </span>
+              )}
             </li>
           ))}
         </ul>
-      ) : (
-        <div className="text-[12px] text-ink-600 italic">No distinguishing evidence points available.</div>
-      )}
-    </Card>
-  );
-}
-
-/** 3. Technical vs content assessment — a side-by-side comparison of
- *  the SAME categoryScores object already shown in the detailed
- *  breakdown below, grouped into "technical/forensic" (technical,
- *  identity, urlDomain, infrastructure) vs "content" (content) columns,
- *  plus the Semantic Content Assessment's concern level alongside it.
- *  No new scoring — purely a regrouped view of existing values. */
-function TechnicalVsContentAssessment({
-  categoryScores,
-  aiStatus,
-  aiConcernLevel,
-  aiBenignExplanation,
-}: {
-  categoryScores: Record<string, { score: number | null; status: string }> | null;
-  aiStatus: AvailabilityStatus;
-  aiConcernLevel: string | null;
-  aiBenignExplanation: string | null;
-}) {
-  return (
-    <Card className="p-5">
-      <SectionLabel className="block mb-3">Technical vs Content Assessment</SectionLabel>
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <div className="text-[10px] uppercase tracking-wider text-ink-500 mb-2">Forensic / Technical Risk</div>
-          {categoryScores ? (
-            <div className="space-y-1.5">
-              {TECHNICAL_CATEGORY_KEYS.map((key) => {
-                const result = categoryScores[key];
-                return (
-                  <div key={key} className="flex items-center justify-between text-[12px]">
-                    <span className="text-ink-400">{CATEGORY_LABELS[key] ?? key}</span>
-                    <span className="mono text-ink-200 font-semibold">{result?.score ?? '—'}</span>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="text-[12px] text-ink-600 italic">Unavailable</div>
-          )}
-        </div>
-        <div>
-          <div className="text-[10px] uppercase tracking-wider text-ink-500 mb-2">Content Risk</div>
-          {categoryScores ? (
-            <div className="space-y-1.5 mb-2">
-              {CONTENT_CATEGORY_KEYS.map((key) => {
-                const result = categoryScores[key];
-                return (
-                  <div key={key} className="flex items-center justify-between text-[12px]">
-                    <span className="text-ink-400">{CATEGORY_LABELS[key] ?? key}</span>
-                    <span className="mono text-ink-200 font-semibold">{result?.score ?? '—'}</span>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="text-[12px] text-ink-600 italic mb-2">Unavailable</div>
-          )}
-          <div className="flex items-center justify-between text-[12px] pt-1.5 border-t border-base-500/15">
-            <span className="text-ink-400">Semantic Content Assessment</span>
-            <span className="mono text-ink-200 font-semibold">
-              {aiStatus === 'Available' && aiConcernLevel ? aiConcernLevel.toUpperCase() : 'UNAVAILABLE'}
-            </span>
-          </div>
-          {aiBenignExplanation && (
-            <p className="text-[11px] text-ink-500 italic mt-1.5 leading-relaxed">{aiBenignExplanation}</p>
-          )}
-        </div>
       </div>
-    </Card>
+    </SectionPanel>
   );
 }
 
-/** 4. Attack story / path summary — reuses the archetype's own basis
- *  list (already the specific evidence citations behind the archetype
- *  call) as the narrative, rather than inventing separate prose. */
-function AttackStorySummary({
+// ---------------------------------------------------------------------
+// 4. Attack Archetype
+// ---------------------------------------------------------------------
+
+function ArchetypeSection({
   archetype,
-  archetypeConfidence,
+  confidence,
   compromiseTier,
   basis,
-  attackType,
 }: {
-  archetype: string;
-  archetypeConfidence: string | null;
+  archetype: string | null;
+  confidence: string | null;
   compromiseTier: string | null;
   basis: string[];
-  attackType: string;
 }) {
   return (
-    <Card className="p-5">
-      <div className="flex items-center gap-2 mb-2">
-        <Route className="w-3.5 h-3.5 text-accent-500" />
-        <SectionLabel>Attack Story</SectionLabel>
-        <ProvenanceTag type="deterministic" />
-      </div>
+    <SectionPanel
+      icon={<Crosshair aria-hidden="true" className="w-5 h-5 text-accent-400" />}
+      title="Attack Archetype"
+      tag={<ProvenanceTag type="deterministic" />}
+      explanation={explainArchetype({ archetype, confidence, compromiseTier })}
+    >
+      {archetype ? (
+        <div className="space-y-2.5">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <Badge variant={archetypeVariant(archetype)} size="lg">
+              {archetypeLabel(archetype)}
+            </Badge>
+            {compromiseTier && (
+              <Badge variant={compromiseTierVariant(compromiseTier.toUpperCase())}>{compromiseTier}</Badge>
+            )}
+            <span className="text-[13px] text-ink-400">
+              Confidence: <span className="font-semibold text-ink-200 uppercase">{confidence ?? 'UNAVAILABLE'}</span>
+            </span>
+          </div>
 
-      <div className="flex items-center gap-2 flex-wrap mb-1.5">
-        <Badge variant={archetypeVariant(archetype)}>{archetypeLabel(archetype)}</Badge>
-        {compromiseTier && <Badge variant={compromiseTierVariant(compromiseTier)}>{compromiseTier}</Badge>}
-        {archetypeConfidence && (
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-500">
-            Confidence: {archetypeConfidence}
-          </span>
-        )}
-        {attackType !== 'UNAVAILABLE' && (
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-500">
-            Semantic attack type: {attackType}
-          </span>
-        )}
-      </div>
+          <p className="text-[12px] text-ink-500 italic">Evidence-based assessment, not confirmed attacker identity.</p>
 
-      <p className="text-[11px] text-ink-600 italic mb-2">
-        Evidence-based assessment, not confirmed attacker identity.
-      </p>
-
-      {basis.length > 0 ? (
-        <ul className="space-y-1.5">
-          {basis.map((item, index) => (
-            <li key={index} className="flex items-start gap-2 text-[12px] text-ink-300 leading-relaxed">
-              <span className="mono text-[10px] text-accent-600 mt-0.5 shrink-0">&bull;</span>
-              <span>{item}</span>
-            </li>
-          ))}
-        </ul>
+          {basis.length > 0 ? (
+            <ul className="panel-2 px-3.5 py-2.5 space-y-1.5">
+              {basis.map((item, index) => (
+                <li key={index} className="flex items-start gap-2 text-[13px] leading-relaxed text-ink-200">
+                  <span aria-hidden="true" className="text-ink-500 mt-px">&bull;</span>
+                  <span className="min-w-0">{item}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-[12px] text-ink-500 italic">No supporting evidence was listed for this assessment.</p>
+          )}
+        </div>
       ) : (
-        <div className="text-[12px] text-ink-600 italic">No path summary available.</div>
+        <StatusNotice
+          label="Archetype"
+          status="UNAVAILABLE"
+          message="No archetype assessment was returned for this email."
+        />
       )}
-    </Card>
+    </SectionPanel>
   );
 }
 
-/** 5. Confidence — pulls together the three separate confidence
- *  signals this page already tracks (deterministic risk confidence,
- *  archetype confidence, AI confidence) into one place rather than
- *  leaving them scattered across three different cards. */
-function ConfidencePanel({
-  riskConfidence,
-  evidenceCoverage,
-  archetypeConfidence,
-  aiConfidence,
-}: {
-  riskConfidence: unknown;
-  evidenceCoverage: unknown;
-  archetypeConfidence: string | null;
-  aiConfidence: string | null;
-}) {
+// ---------------------------------------------------------------------
+// 5. ML Assessment
+// ---------------------------------------------------------------------
+
+function KeyValueRow({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <Card className="p-5">
-      <SectionLabel className="block mb-3">Confidence</SectionLabel>
-      <div className="grid grid-cols-4 gap-3">
-        <PreviewField label="Risk Engine Confidence" value={formatFraction(riskConfidence)} mono />
-        <PreviewField label="Evidence Coverage" value={formatFraction(evidenceCoverage)} mono />
-        <PreviewField label="Archetype Confidence" value={archetypeConfidence ?? 'UNAVAILABLE'} />
-        <PreviewField label="Semantic Assessment Confidence" value={aiConfidence ?? 'UNAVAILABLE'} />
-      </div>
-    </Card>
+    <div className="grid grid-cols-[minmax(0,11.5rem)_minmax(0,1fr)] gap-x-4 py-1.5 border-b border-base-500/20 last:border-b-0 text-[13px]">
+      <dt className="text-ink-400">{label}</dt>
+      <dd className="font-medium text-ink-100 min-w-0 break-words">{children}</dd>
+    </div>
   );
 }
 
-function UnavailablePanel({
+function Missing() {
+  return <span className="text-ink-500 font-normal">UNAVAILABLE</span>;
+}
+
+function MlSection({
   status,
-  label,
+  classification,
+  modelName,
+  modelVersion,
+  tokenizer,
+  probabilityPct,
 }: {
   status: AvailabilityStatus;
-  label: string;
+  classification: string | null;
+  modelName: string;
+  modelVersion: string | null;
+  tokenizer: string | null;
+  probabilityPct: number | null;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center text-center px-6">
-      <ShieldQuestion className="w-8 h-8 text-ink-600 mb-3" />
+    <SectionPanel
+      icon={<BrainCircuit aria-hidden="true" className="w-5 h-5 text-violet-400" />}
+      title="ML Assessment"
+      tag={<ProvenanceTag type="ml" />}
+      explanation={explainMl({ status, classification, probabilityPct })}
+    >
+      {status === 'Available' ? (
+        <>
+          <dl>
+            <KeyValueRow label="Classification">{classification ?? <Missing />}</KeyValueRow>
+            <KeyValueRow label="Model">{modelName === 'UNAVAILABLE' ? <Missing /> : modelName}</KeyValueRow>
+            <KeyValueRow label="Version">{modelVersion ? <span className="mono">{modelVersion}</span> : <Missing />}</KeyValueRow>
+            <KeyValueRow label="Tokenization">{tokenizer ? <span className="mono">{tokenizer}</span> : <Missing />}</KeyValueRow>
+            <KeyValueRow label="ML Probability">
+              {probabilityPct !== null ? <span className="mono">{percentLabel(probabilityPct)}</span> : <Missing />}
+            </KeyValueRow>
+            <KeyValueRow label="Model Status">
+              <span className={AVAILABILITY_TEXT[status]}>{status}</span>
+            </KeyValueRow>
+          </dl>
+          <p className="mt-2 text-[11px] text-ink-500 italic">
+            Model output only — not the overall risk score or verdict.
+          </p>
+        </>
+      ) : (
+        <StatusNotice
+          label="Model status"
+          status={status.toUpperCase()}
+          message={
+            status === 'Inconclusive'
+              ? 'The ML assessment was inconclusive for this email.'
+              : 'No ML assessment was returned for this email.'
+          }
+        />
+      )}
+    </SectionPanel>
+  );
+}
 
-      <div
-        className={cn(
-          'text-sm font-bold uppercase tracking-wider',
-          statusColor(status)
-        )}
-      >
-        {label} {status}
-      </div>
+// ---------------------------------------------------------------------
+// 6. AI-Assisted Interpretation
+// ---------------------------------------------------------------------
 
-      <p className="text-[11px] text-ink-600 mt-1.5 max-w-[200px]">
-        The rest of this investigation remains fully usable.
-        Review Forensics, Indicators, and Infrastructure for
-        supporting evidence.
-      </p>
-    </div>
+function AiSection({
+  status,
+  aiAssessment,
+  concernLevel,
+  confidence,
+}: {
+  status: AvailabilityStatus;
+  aiAssessment: any;
+  concernLevel: string | null;
+  confidence: string | null;
+}) {
+  const attackType = nonEmptyString(aiAssessment.attackType);
+  const summary = nonEmptyString(aiAssessment.summary);
+
+  return (
+    <SectionPanel
+      icon={<Sparkles aria-hidden="true" className="w-5 h-5 text-amber-400" />}
+      title="AI-Assisted Interpretation"
+      tag={<ProvenanceTag type="ai" />}
+      headerExtra={
+        // When unavailable/inconclusive the body's status notice already says so; the pill is only
+        // shown for the available state so the status is never repeated.
+        status === 'Available' ? (
+          <span className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-ink-400">
+            AI Status:
+            <span className="rounded border border-emerald-700/30 bg-emerald-900/15 px-2 py-0.5 text-[10px] font-bold tracking-wider text-emerald-400">
+              AVAILABLE
+            </span>
+          </span>
+        ) : undefined
+      }
+      explanation={explainAi({ status })}
+    >
+      {status === 'Available' ? (
+        <div className="space-y-2">
+          <p className="text-[11px] text-ink-500 italic">
+            Secondary interpretation — the deterministic risk engine remains the authoritative verdict.
+          </p>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-2">
+            {TECHNIQUE_FLAGS.map(({ label, key }) => {
+              const raw = aiAssessment[key];
+              const pct = typeof raw === 'number' ? probabilityToPercent(raw) : null;
+              return (
+                <div key={key} className="panel-2 px-3.5 py-2.5 min-w-0">
+                  <div className="text-[12px] text-ink-400 truncate" title={label}>
+                    {label}
+                  </div>
+                  <div
+                    className={cn(
+                      'mt-0.5 text-xl font-bold leading-tight tabular-nums',
+                      pct === null ? 'text-ink-500' : 'text-ink-50'
+                    )}
+                  >
+                    {pct === null ? 'N/A' : `${pct}%`}
+                  </div>
+                  {/* Magnitude bar only — no severity colouring or thresholds. */}
+                  <div className="mt-1.5 h-1 rounded-full bg-base-500/40 overflow-hidden" aria-hidden="true">
+                    <div className="h-full rounded-full bg-amber-400/70" style={{ width: `${pct ?? 0}%` }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="grid gap-2 lg:grid-cols-2">
+            <div className="panel-2 px-3.5 py-2.5 min-w-0">
+              <div className="text-[12px] text-ink-400">Attack Type</div>
+              <div className="mt-0.5 text-[13px] font-medium text-ink-100 break-words">
+                {attackType ?? <Missing />}
+              </div>
+            </div>
+            <div className="panel-2 px-3.5 py-2.5 min-w-0">
+              <div className="text-[12px] text-ink-400">AI Concern Level</div>
+              <div className="mt-0.5 text-[13px] font-medium text-ink-100 break-words">
+                {concernLevel ? (
+                  <>
+                    <span className="uppercase">{concernLevel}</span>
+                    {confidence && <span className="text-ink-400 font-normal"> ({confidence} confidence)</span>}
+                  </>
+                ) : (
+                  <Missing />
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="panel-2 px-3.5 py-2.5">
+            <div className="text-[12px] text-ink-400">AI Summary</div>
+            <p className="mt-0.5 text-[13px] leading-relaxed text-ink-200">{summary ?? <Missing />}</p>
+          </div>
+        </div>
+      ) : (
+        <StatusNotice
+          label="AI Status"
+          status={status.toUpperCase()}
+          message={
+            status === 'Inconclusive'
+              ? 'The semantic assessment was inconclusive for this email. The deterministic analysis remains the authoritative result.'
+              : 'No semantic assessment was returned for this email. The deterministic analysis remains the authoritative result.'
+          }
+        />
+      )}
+    </SectionPanel>
+  );
+}
+
+// ---------------------------------------------------------------------
+// 7 & 8. Collapsible rows: Technical Evidence / Detailed Analysis
+// ---------------------------------------------------------------------
+
+function CollapsibleRow({
+  icon,
+  title,
+  subtitle,
+  explanation,
+  children,
+}: {
+  icon: ReactNode;
+  title: string;
+  subtitle: string;
+  explanation: string[];
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const bodyId = useId();
+  const explain = useExplain(false);
+  const titleId = useId();
+
+  return (
+    <section aria-labelledby={titleId}>
+      <Card>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
+          <div className="flex items-center gap-3 min-w-0 flex-1 basis-[16rem]">
+            {icon}
+            <h2 id={titleId} className="text-[15px] font-semibold text-ink-100 shrink-0">
+              {title}
+            </h2>
+            <span className="hidden lg:inline text-[12px] text-ink-500 truncate min-w-0">{subtitle}</span>
+          </div>
+
+          <div className="flex items-center gap-2 ml-auto">
+            <ExplainToggle open={explain.open} panelId={explain.panelId} onToggle={explain.toggle} />
+            <button
+              type="button"
+              aria-expanded={open}
+              aria-controls={bodyId}
+              onClick={() => setOpen((v) => !v)}
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[12px] font-semibold text-ink-200 whitespace-nowrap',
+                'hover:text-ink-50 hover:bg-base-600/40 transition-colors',
+                'focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60'
+              )}
+            >
+              {open ? 'Hide Details' : 'Show Details'}
+              <span className="sr-only"> for {title}</span>
+              <ChevronRight
+                aria-hidden="true"
+                className={cn('w-4 h-4 transition-transform duration-150', open && 'rotate-90')}
+              />
+            </button>
+          </div>
+        </div>
+
+        <ExplainPanel
+          open={explain.open}
+          panelId={explain.panelId}
+          paragraphs={explanation}
+          className="mx-4 mb-3"
+        />
+
+        <div id={bodyId} hidden={!open} className="px-4 pb-4 pt-3 border-t border-base-500/20">
+          {open && children}
+        </div>
+      </Card>
+    </section>
   );
 }
 
 function SignalStat({
   label,
   value,
-  danger,
+  tone,
 }: {
   label: string;
   value: string | number;
-  danger?: boolean;
+  tone: AuthTone | 'plain';
 }) {
   return (
-    <div className="panel-2 p-3.5">
-      <div
-        className={cn(
-          'text-xl font-bold tabular-nums mono',
-          danger
-            ? 'text-accent-400'
-            : 'text-emerald-400'
-        )}
-      >
+    <div className="panel-2 px-3.5 py-2.5 min-w-0">
+      <div className="text-[12px] text-ink-400">{label}</div>
+      <div className={cn('mt-0.5 text-xl font-bold leading-tight tabular-nums mono break-words', AUTH_TONE_TEXT[tone])}>
         {value}
-      </div>
-
-      <div className="section-label mt-1">
-        {label}
       </div>
     </div>
   );
 }
 
-function renderAIPreview(
-  email: any,
-  onInvestigate: () => void
-) {
+function TechnicalEvidenceSection({
+  spf,
+  dkim,
+  dmarc,
+  ipCount,
+  domainCount,
+}: {
+  spf: string;
+  dkim: string;
+  dmarc: string;
+  ipCount: number;
+  domainCount: number;
+}) {
+  return (
+    <CollapsibleRow
+      icon={<FileText aria-hidden="true" className="w-5 h-5 text-sky-400 shrink-0" />}
+      title="Technical Evidence"
+      subtitle="SPF, DKIM, DMARC, IPs, domains and other technical details"
+      explanation={explainTechnicalEvidence({ spf, dkim, dmarc, ipCount, domainCount })}
+    >
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+        {/* An indicator COUNT is neutral: many domains or IPs is not itself a risk signal. */}
+        <SignalStat label="IP / Domain Indicators" value={ipCount + domainCount} tone="plain" />
+        <SignalStat label="SPF" value={spf.toUpperCase()} tone={authTone(spf)} />
+        <SignalStat label="DKIM" value={dkim.toUpperCase()} tone={authTone(dkim)} />
+        <SignalStat label="DMARC" value={dmarc.toUpperCase()} tone={authTone(dmarc)} />
+      </div>
+      <p className="mt-2 text-[11px] text-ink-500 italic leading-relaxed">
+        Technical evidence is derived from the scanned email and deterministic analysis. ML and AI sections
+        interpret this evidence; they are not the source of the underlying technical facts.
+      </p>
+    </CollapsibleRow>
+  );
+}
+
+function ChipList({ label, items, max = 24 }: { label: string; items: string[]; max?: number }) {
+  if (items.length === 0) return null;
+  const shown = items.slice(0, max);
+  return (
+    <div>
+      <div className="text-[11px] font-semibold uppercase tracking-wider text-ink-500 mb-1.5">
+        {label} <span className="text-ink-600">({items.length})</span>
+      </div>
+      <ul className="flex flex-wrap gap-1.5">
+        {shown.map((item, i) => (
+          <li key={`${item}-${i}`} className="mono text-[11px] text-ink-300 panel-2 px-2 py-1 break-all max-w-full">
+            {item}
+          </li>
+        ))}
+        {items.length > max && (
+          <li className="text-[11px] text-ink-500 px-1 py-1">+{items.length - max} more</li>
+        )}
+      </ul>
+    </div>
+  );
+}
+
+function GroupedList({ messages, max = 8 }: { messages: unknown[]; max?: number }) {
+  const grouped = groupRepeated(messages);
+  if (grouped.length === 0) return null;
+  const render = (g: { message: string; count: number }, i: number) => (
+    <li key={i} className="flex items-start gap-2 text-[12px] leading-relaxed text-ink-300">
+      <span aria-hidden="true" className="text-ink-500 mt-px">&bull;</span>
+      <span className="min-w-0">
+        {g.message}
+        {g.count > 1 && <span className="ml-1.5 mono text-[10px] text-ink-500">×{g.count}</span>}
+      </span>
+    </li>
+  );
+  const head = grouped.slice(0, max);
+  const rest = grouped.slice(max);
+  return (
+    <>
+      <ul className="space-y-1">{head.map(render)}</ul>
+      {rest.length > 0 && (
+        <details className="mt-1">
+          <summary className="cursor-pointer text-[11px] text-ink-400 hover:text-ink-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 rounded">
+            Show {rest.length} more
+          </summary>
+          <ul className="space-y-1 mt-1">{rest.map((g, i) => render(g, i + max))}</ul>
+        </details>
+      )}
+    </>
+  );
+}
+
+function DetailBlock({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div>
+      <SectionLabel className="block mb-2">{title}</SectionLabel>
+      {children}
+    </div>
+  );
+}
+
+function DetailedAnalysisSection({
+  emailId,
+  explanations,
+  categoryScores,
+  aiStatus,
+  aiAssessment,
+  iocs,
+}: {
+  emailId: string;
+  explanations: any[];
+  categoryScores: CategoryScores | null;
+  aiStatus: AvailabilityStatus;
+  aiAssessment: any;
+  iocs: { ips: string[]; domains: string[]; urls: string[]; emails: string[]; hashes: string[] };
+}) {
+  const whyFlagged = explanations.map((item) => item?.message);
+
+  const categoriesWithEvidence = categoryScores
+    ? orderedCategoryKeys(categoryScores)
+        .map((key) => ({
+          key,
+          score: usableCategoryScore(categoryScores[key]),
+          messages: (categoryScores[key]?.evidence ?? []).map((e) => e?.message),
+        }))
+        .filter((c) => groupRepeated(c.messages).length > 0)
+    : [];
+
+  const aiAvailable = aiStatus === 'Available';
+  const aiReasons = aiAvailable ? stringList(aiAssessment.topReasons) : [];
+  const aiBenign = aiAvailable ? nonEmptyString(aiAssessment.benignExplanation) : null;
+  const aiActions: string[] = aiAvailable
+    ? (Array.isArray(aiAssessment.recommendedActions) ? aiAssessment.recommendedActions : [])
+        .map((a: any) => (typeof a === 'string' ? a : a?.action || a?.reason || ''))
+        .filter((s: unknown): s is string => typeof s === 'string' && s.trim() !== '')
+    : [];
+
+  const hasWhy = groupRepeated(whyFlagged).length > 0;
+  const hasIocs =
+    iocs.ips.length + iocs.domains.length + iocs.urls.length + iocs.emails.length + iocs.hashes.length > 0;
+
+  return (
+    <CollapsibleRow
+      icon={<ListChecks aria-hidden="true" className="w-5 h-5 text-sky-400 shrink-0" />}
+      title="Detailed Analysis"
+      subtitle="View full evidence, extracted IOCs, headers, body analysis and more"
+      explanation={[
+        'This area collects the lower-level material behind the summary above: the individual findings the deterministic engine recorded, the AI\u2019s own notes, and the indicators extracted from the message.',
+        'Nothing here changes the scores. Repeated identical findings are grouped and shown once with a count.',
+      ]}
+    >
+      <div className="space-y-5">
+        <DetailBlock title="Evidence Recorded by the Risk Engine">
+          {hasWhy ? (
+            <GroupedList messages={whyFlagged} />
+          ) : (
+            <p className="text-[12px] text-ink-500 italic">No distinguishing evidence points were recorded.</p>
+          )}
+        </DetailBlock>
+
+        {categoriesWithEvidence.length > 0 && (
+          <DetailBlock title="Evidence by Category">
+            <div className="grid gap-3 lg:grid-cols-2">
+              {categoriesWithEvidence.map((c) => (
+                <div key={c.key} className="panel-2 px-3.5 py-2.5 min-w-0">
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <span className="text-[12px] font-medium text-ink-200">{CATEGORY_LABELS[c.key] ?? c.key}</span>
+                    <span className="mono text-[12px] text-ink-300">{c.score === null ? 'N/A' : c.score}</span>
+                  </div>
+                  <GroupedList messages={c.messages} max={5} />
+                </div>
+              ))}
+            </div>
+          </DetailBlock>
+        )}
+
+        {aiAvailable && (aiReasons.length > 0 || aiBenign || aiActions.length > 0) && (
+          <DetailBlock title="AI Notes (secondary interpretation)">
+            <div className="space-y-3">
+              {aiReasons.length > 0 && <GroupedList messages={aiReasons} />}
+              {aiBenign && (
+                <div className="panel-2 px-3.5 py-2.5">
+                  <div className="text-[11px] text-ink-500 mb-1">Benign contextual explanation</div>
+                  <p className="text-[12px] leading-relaxed text-ink-300">{aiBenign}</p>
+                </div>
+              )}
+              {aiActions.length > 0 && (
+                <div>
+                  <div className="text-[11px] text-ink-500 mb-1">Recommended actions</div>
+                  <GroupedList messages={aiActions} />
+                </div>
+              )}
+            </div>
+          </DetailBlock>
+        )}
+
+        <DetailBlock title="Extracted Indicators (IOCs)">
+          {hasIocs ? (
+            <div className="space-y-3">
+              <ChipList label="IP addresses" items={iocs.ips} />
+              <ChipList label="Domains" items={iocs.domains} />
+              <ChipList label="URLs" items={iocs.urls} />
+              <ChipList label="Email addresses" items={iocs.emails} />
+              <ChipList label="Hashes" items={iocs.hashes} />
+            </div>
+          ) : (
+            <p className="text-[12px] text-ink-500 italic">No indicators were extracted from this message.</p>
+          )}
+        </DetailBlock>
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-ink-400">
+          <span>Full headers, received chain and body analysis:</span>
+          <Link to="/forensics" state={{ emailId }} className="text-sky-500 hover:underline">
+            Forensics
+          </Link>
+          <Link to="/indicators" state={{ emailId }} className="text-sky-500 hover:underline">
+            Indicators
+          </Link>
+          <Link to="/infrastructure" state={{ emailId }} className="text-sky-500 hover:underline">
+            Infrastructure
+          </Link>
+        </div>
+      </div>
+    </CollapsibleRow>
+  );
+}
+
+// ---------------------------------------------------------------------
+// Email picker preview (unchanged)
+// ---------------------------------------------------------------------
+
+function renderAIPreview(email: any, onInvestigate: () => void) {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between mb-4">
         <SectionLabel>AI Preview</SectionLabel>
-        <Badge variant="neutral">
-          Detailed View
-        </Badge>
+        <Badge variant="neutral">Detailed View</Badge>
       </div>
 
       <div className="flex items-center gap-2.5 mb-4">
@@ -1307,29 +1254,21 @@ function renderAIPreview(
             {email.subject || 'No Subject'}
           </div>
 
-          <div className="mono text-[10px] text-ink-500 mt-1">
-            {email.caseId || email.id}
-          </div>
+          <div className="mono text-[10px] text-ink-500 mt-1">{email.caseId || email.id}</div>
         </div>
       </div>
 
       <Card className="flex flex-col items-center justify-center py-12 border-dashed border-base-500/30 bg-base-900/30 mb-5">
         <Brain className="w-8 h-8 text-ink-600 mb-3" />
 
-        <div className="text-[12px] font-semibold text-ink-300 mb-1">
-          Detailed AI / ML Analysis
-        </div>
+        <div className="text-[12px] font-semibold text-ink-300 mb-1">Detailed AI / ML Analysis</div>
 
         <div className="text-[11px] text-ink-500 text-center max-w-[220px] leading-relaxed">
-          Open the full investigation to load the
-          selected email's stored ML and AI analysis.
+          Open the full investigation to load the selected email's stored ML and AI analysis.
         </div>
       </Card>
 
-      <PreviewInvestigateButton
-        label="Open AI Investigation"
-        onClick={onInvestigate}
-      />
+      <PreviewInvestigateButton label="Open AI Investigation" onClick={onInvestigate} />
     </div>
   );
 }

@@ -12,6 +12,9 @@ interface InvestigationShellProps {
   subtitle?: string;
   actions?: ReactNode;
   children: ReactNode;
+  /** Omit the generic page heading (title / subtitle / actions). For pages that render their own
+   *  compact header card once an email is open, so the same subject/score/status isn't shown twice. */
+  compactHeading?: boolean;
   /** Hide the compact case-switcher dropdown — used when the page body already
    *  renders the full email table (InvestigationWorkspace) as the selector. */
   hideCaseSelector?: boolean;
@@ -34,6 +37,7 @@ export function InvestigationShell({
   subtitle,
   actions,
   children,
+  compactHeading,
   hideCaseSelector,
   selectedEmail,
   availableEmails,
@@ -79,13 +83,18 @@ export function InvestigationShell({
         )}
 
         {/* Page heading */}
-        <div className="flex items-end justify-between mb-6">
-          <div>
-            <h1 className="text-xl font-bold text-ink-50">{title}</h1>
-            {subtitle && <p className="text-xs text-ink-500 mt-1">{subtitle}</p>}
+        {compactHeading ? (
+          // Keep an accessible page title without taking up visual space.
+          <h1 className="sr-only">{title}</h1>
+        ) : (
+          <div className="flex items-end justify-between mb-6">
+            <div>
+              <h1 className="text-xl font-bold text-ink-50">{title}</h1>
+              {subtitle && <p className="text-xs text-ink-500 mt-1">{subtitle}</p>}
+            </div>
+            <div className="print:hidden">{actions}</div>
           </div>
-          <div className="print:hidden">{actions}</div>
-        </div>
+        )}
 
         {children}
       </div>

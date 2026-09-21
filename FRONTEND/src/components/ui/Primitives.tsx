@@ -39,6 +39,8 @@ type BadgeVariant = 'neutral' | 'danger' | 'warning' | 'success' | 'active' | 'c
 interface BadgeProps {
   children: ReactNode;
   variant?: BadgeVariant;
+  /** 'sm' (default) is the original size; 'lg' is for a section's primary label. */
+  size?: 'sm' | 'lg';
   className?: string;
 }
 
@@ -51,11 +53,12 @@ const badgeStyles: Record<BadgeVariant, string> = {
   critical: 'bg-accent-700/30 text-accent-300 border-accent-600/50 threat-glow',
 };
 
-export function Badge({ children, variant = 'neutral', className }: BadgeProps) {
+export function Badge({ children, variant = 'neutral', size = 'sm', className }: BadgeProps) {
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md border text-[10px] font-semibold uppercase tracking-wider',
+        'inline-flex items-center gap-1.5 rounded-md border font-semibold uppercase tracking-wider',
+        size === 'lg' ? 'px-3 py-1 text-[12px]' : 'px-2.5 py-0.5 text-[10px]',
         badgeStyles[variant],
         className
       )}
